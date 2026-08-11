@@ -1,4 +1,4 @@
-// 接个话 — API 路由
+// 解语花 — API 路由
 // 配置读写 / 模型列表 / 测试 / 推荐取用 / 直接发送 / 检查更新
 
 import fs from "node:fs";
@@ -7,6 +7,13 @@ import { fileURLToPath } from "node:url";
 import { getConfig, setConfig, loadData, getPending, withDataLock, normalizeStyles, DEFAULT_CONFIG, saveData } from "../lib/data.js";
 import { getAvailableModels, generateSuggestions, parseSuggestions, encryptKey, redactSecrets, validateBaseUrl, callLLM } from "../lib/llm.js";
 import { compareVersions } from "../lib/version.js";
+import { claimAndSend } from "../lib/send.js";
+import {
+  startZhujian,
+  stopZhujian,
+  getZhujianState,
+  checkZhujianDeps,
+} from "../lib/zhujian.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -18,16 +25,6 @@ export default function registerPluginApiRoutes(app, ctx) {
   const CHAT_SESSION_TTL = 30 * 60 * 1000;
   function genSessionId() {
     return "chat_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 10);
-  }
-  // 发送失败回滚 used 标记（配合 /api/apply 的预标记原子语义）
-  function rollbackUsed(dataDir, rid) {
-    return withDataLock(() => {
-      const data = loadData(dataDir);
-      if (data.pending && data.pending[rid]) {
-        data.pending[rid].used = false;
-        saveData(dataDir, data);
-      }
-    });
   }
   function cleanupChatSessions() {
     const now = Date.now();
@@ -56,7 +53,7 @@ export default function registerPluginApiRoutes(app, ctx) {
       const body = await c.req.json().catch(() => ({}));
       const patch = {};
 
-      if (typeof body.enabled === "boolean") patch.enabled = body.enabled;
+      if (body.presentation === "card" || body.presentation === "ball" || body.presentation === "off") patch.presentation = body.presentation;
       if (body.mode === "auto" || body.mode === "always") patch.mode = body.mode;
       if ([2, 3, 4].includes(body.count)) patch.count = body.count;
       if (body.action === "send" || body.action === "copy") patch.action = body.action;
@@ -146,72 +143,15 @@ export default function registerPluginApiRoutes(app, ctx) {
 
   // ─── 直接发送（点击推荐 → 伪装成用户消息提交到会话） ───
   // 协议：只传 index（0~3），text 由服务端从推荐列表取（防注入：rid 泄露也不能塞任意内容）
-  // 原子性：写锁内检查 used + 预标记，发送失败回滚（防双击/并发重复发送）
-  // 通道：bus.request("session:send", { text, sessionId })（闲不住生产验证过的同款通道）
+  // 共用 lib/send.js claimAndSend（卡片页与竹简悬浮球同一套原子逻辑）
   app.post("/api/apply", async (c) => {
     try {
       const body = await c.req.json().catch(() => ({}));
-      const rid = String(body.r || "");
-      const index = Number(body.index);
-      if (!rid || !Number.isInteger(index) || index < 0 || index > 3) {
-        return json({ ok: false, error: "参数不完整" });
-      }
-
-      // 写锁内：校验存在 + 未用 + index 有效，同时预标记 used
-      let entry = null;
-      let text = "";
-      const claimed = await withDataLock(() => {
-        const data = loadData(dataDir);
-        const e = data.pending[rid];
-        if (!e || e.used) return false;
-        const item = Array.isArray(e.items) ? e.items[index] : null;
-        if (!item || typeof item.text !== "string") return false;
-        const t = item.text.trim();
-        if (!t || t.length > 500) return false;
-        text = t;
-        entry = e;
-        e.used = true;
-        saveData(dataDir, data);
-        return true;
-      });
-      if (!claimed) return json({ ok: false, error: "这条推荐已失效，重新生成一下吧" });
-
-      const bus = ctx.bus;
-      if (!bus || typeof bus.request !== "function") {
-        await rollbackUsed(dataDir, rid);
-        return json({ ok: false, error: "消息通道不可用" });
-      }
-
-      const sessionId = entry.sessionId || "";
-      const sessionPath = entry.sessionPath || "";
-      if (!sessionId && !sessionPath) {
-        await rollbackUsed(dataDir, rid);
-        return json({ ok: false, error: "找不到目标会话，换新窗口再试" });
-      }
-
-      const payload = { text, sessionId: sessionId || undefined, sessionPath: sessionPath || undefined };
-
-      // 会话忙（流式输出中）时等待重试：2s / 5s / 10s，最多 3 次（闲不住同款）
-      const delays = [2000, 5000, 10000];
-      try {
-        for (let attempt = 0; ; attempt++) {
-          try {
-            await bus.request("session:send", payload);
-            break;
-          } catch (e) {
-            const busy = /busy/i.test(e?.message || String(e));
-            if (!busy || attempt >= delays.length) throw e;
-            await new Promise((r) => setTimeout(r, delays[attempt]));
-          }
-        }
-      } catch (err) {
-        await rollbackUsed(dataDir, rid);
-        throw err;
-      }
-
+      const result = await claimAndSend(dataDir, { rid: body.r, index: body.index }, ctx.bus);
+      if (!result.ok) return json({ ok: false, error: result.error });
       return json({ ok: true, message: "已发送" });
     } catch (err) {
-      ctx.log?.error?.("[接个话] 发送失败", { error: redactSecrets(err?.message || String(err)) });
+      ctx.log?.error?.("[解语花] 发送失败", { error: redactSecrets(err?.message || String(err)) });
       return json({ ok: false, error: redactSecrets(err?.message || "发送失败") });
     }
   });
@@ -256,7 +196,7 @@ export default function registerPluginApiRoutes(app, ctx) {
         .join("\n");
 
       const prompt = [
-        "你是「接个话」的方向设计师。这个插件的核心就是 4 个推荐方向——每次帮用户接话前，会按这些方向生成推荐语。",
+        "你是「解语花」的方向设计师。这个插件的核心就是 4 个推荐方向——每次帮用户接话前，会按这些方向生成推荐语。",
         "这 4 个方向是你一手打磨出来的作品，你最清楚它们的脾气和用途：",
         stylesText,
         "",
@@ -308,7 +248,7 @@ export default function registerPluginApiRoutes(app, ctx) {
         suggestion
       });
     } catch (err) {
-      ctx.log?.error?.("[接个话] 聊方向失败", { error: redactSecrets(err?.message || String(err)) });
+      ctx.log?.error?.("[解语花] 聊方向失败", { error: redactSecrets(err?.message || String(err)) });
       return json({ ok: false, error: redactSecrets(err?.message || "聊一聊失败") });
     }
   });
@@ -349,14 +289,13 @@ export default function registerPluginApiRoutes(app, ctx) {
       await setConfig(dataDir, { styles: normalized });
       return json({ ok: true, message: "已应用", styles: normalized });
     } catch (err) {
-      ctx.log?.error?.("[接个话] 应用修改失败", { error: redactSecrets(err?.message || String(err)) });
+      ctx.log?.error?.("[解语花] 应用修改失败", { error: redactSecrets(err?.message || String(err)) });
       return json({ ok: false, error: redactSecrets(err?.message || "应用失败") });
     }
   });
 
   // ─── 检查更新（分享版标配） ───
-  const GITHUB_REPO = "moononnn/hanako--jiegehua";
-  app.get("/api/check-update", async (c) => {
+  const GITHUB_REPO = "moononnn/hanako-jieyuhua";  app.get("/api/check-update", async (c) => {
     try {
       const manifestPath = path.join(__dirname, "..", "manifest.json");
       const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
@@ -392,11 +331,28 @@ export default function registerPluginApiRoutes(app, ctx) {
       return json({ success: false, error: "暂时不可用", repoUrl: `https://github.com/${GITHUB_REPO}` });
     }
   });
+
+  // ────────────────────────────────────────────
+  //  竹简悬浮球 — 启动 / 停止 / 状态 / 依赖检查
+  // ────────────────────────────────────────────
+  app.post("/api/ball/start", async (c) => {
+    const res = startZhujian(ctx);
+    return json(res, res.ok ? 200 : 400);
+  });
+  app.post("/api/ball/stop", async (c) => {
+    const res = stopZhujian();
+    return json(res, res.ok ? 200 : 400);
+  });
+  app.get("/api/ball/status", async (c) => {
+    const st = getZhujianState();
+    const deps = await checkZhujianDeps();
+    return json({ ...st, ...deps });
+  });
 }
 
 function testPrompt(count) {
   return [
-    "你是「接个话」推荐引擎，你是用户的「嘴替」。这是一次连通测试，",
+    "你是「解语花」推荐引擎，你是用户的「嘴替」。这是一次连通测试，",
     "请生成", String(count),
     "条「用户准备发给 AI 助手的话」（任意日常话题）。",
     "必须是用户的第一人称口吻（「我」），对助手说话，每条 5~20 个字，口语化，",

@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 落樱悬浮球 · 方案 B+：手帐简笔风加立体层次
+     在原有 5 瓣水滴造型基础上加法：
+     1) 花瓣渐变（瓣尖深粉 → 瓣根浅粉，体积感）
+     2) 每瓣中轴白色高光（受光感）
+     3) 花蕊加密到 8 根、花药点加大（更丰富醒目）
+     4) 花心层次：深粉阴影环 + 黄渐变中心 + 高光点 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400" width="400" height="400">
+  <defs>
+    <linearGradient id="petalGrad" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0%" stop-color="#fdf2f4"/>
+      <stop offset="55%" stop-color="#f9cfda"/>
+      <stop offset="100%" stop-color="#e68aa6"/>
+    </linearGradient>
+    <radialGradient id="centerGrad" cx="0.35" cy="0.35" r="0.95">
+      <stop offset="0%" stop-color="#fdf5bd"/>
+      <stop offset="100%" stop-color="#efcf7e"/>
+    </radialGradient>
+  </defs>
+
+  <g transform="translate(200 200)">
+    <!-- 5 瓣：渐变 + 中轴高光，每瓣独立旋转 -->
+    <g stroke="#3f4a42" stroke-width="3" stroke-linejoin="round">
+      <g transform="rotate(0)">
+        <path d="M 0 -8 Q -32 -25 -34 -68 Q -22 -90 0 -82 Q 22 -90 34 -68 Q 32 -25 0 -8 Z" fill="url(#petalGrad)"/>
+        <ellipse cx="0" cy="-44" rx="5" ry="20" fill="#ffffff" opacity="0.55"/>
+      </g>
+      <g transform="rotate(72)">
+        <path d="M 0 -8 Q -32 -25 -34 -68 Q -22 -90 0 -82 Q 22 -90 34 -68 Q 32 -25 0 -8 Z" fill="url(#petalGrad)"/>
+        <ellipse cx="0" cy="-44" rx="5" ry="20" fill="#ffffff" opacity="0.55"/>
+      </g>
+      <g transform="rotate(144)">
+        <path d="M 0 -8 Q -32 -25 -34 -68 Q -22 -90 0 -82 Q 22 -90 34 -68 Q 32 -25 0 -8 Z" fill="url(#petalGrad)"/>
+        <ellipse cx="0" cy="-44" rx="5" ry="20" fill="#ffffff" opacity="0.55"/>
+      </g>
+      <g transform="rotate(216)">
+        <path d="M 0 -8 Q -32 -25 -34 -68 Q -22 -90 0 -82 Q 22 -90 34 -68 Q 32 -25 0 -8 Z" fill="url(#petalGrad)"/>
+        <ellipse cx="0" cy="-44" rx="5" ry="20" fill="#ffffff" opacity="0.55"/>
+      </g>
+      <g transform="rotate(288)">
+        <path d="M 0 -8 Q -32 -25 -34 -68 Q -22 -90 0 -82 Q 22 -90 34 -68 Q 32 -25 0 -8 Z" fill="url(#petalGrad)"/>
+        <ellipse cx="0" cy="-44" rx="5" ry="20" fill="#ffffff" opacity="0.55"/>
+      </g>
+    </g>
+
+    <!-- 花心阴影环：花瓣根部汇聚处的暗部，增加叠压深度 -->
+    <circle cx="0" cy="0" r="14" fill="#e68aa6" opacity="0.5"/>
+
+    <!-- 花蕊：8 根粉红细丝（根部被黄圈盖住） -->
+    <g stroke="#d97b95" stroke-width="2.2" stroke-linecap="round">
+      <line x1="0" y1="0" x2="0" y2="-20"/>
+      <line x1="0" y1="0" x2="19" y2="-6.2"/>
+      <line x1="0" y1="0" x2="19" y2="6.2"/>
+      <line x1="0" y1="0" x2="0" y2="20"/>
+      <line x1="0" y1="0" x2="-19" y2="6.2"/>
+      <line x1="0" y1="0" x2="-19" y2="-6.2"/>
+      <line x1="0" y1="0" x2="12.4" y2="-15.7"/>
+      <line x1="0" y1="0" x2="-12.4" y2="-15.7"/>
+    </g>
+
+    <!-- 花药点（淡黄，加大到 r=3.4 保证 64px 下可见） -->
+    <g fill="#e0aa4f">
+      <circle cx="0" cy="-20" r="3.4"/>
+      <circle cx="19" cy="-6.2" r="3.4"/>
+      <circle cx="19" cy="6.2" r="3.4"/>
+      <circle cx="0" cy="20" r="3.4"/>
+      <circle cx="-19" cy="6.2" r="3.4"/>
+      <circle cx="-19" cy="-6.2" r="3.4"/>
+      <circle cx="12.4" cy="-15.7" r="3.2"/>
+      <circle cx="-12.4" cy="-15.7" r="3.2"/>
+    </g>
+
+    <!-- 花心：黄渐变圆 + 墨描边 + 高光点 -->
+    <circle cx="0" cy="0" r="9" fill="url(#centerGrad)" stroke="#3f4a42" stroke-width="2.5"/>
+    <ellipse cx="-2.6" cy="-3" rx="2.8" ry="1.7" fill="#ffffff" opacity="0.8"/>
+  </g>
+</svg>

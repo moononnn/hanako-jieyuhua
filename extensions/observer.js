@@ -1,4 +1,4 @@
-// 接个话 — Pi SDK Extension（对话注入）
+// 解语花 — Pi SDK Extension（对话注入）
 // 参考表情包插件生产验证过的注入姿势（2026-08-06 实测修正）：
 //   工厂签名：export default function (pi) { pi.on('context', handler) }
 //   事件名：'context'（LLM 调用前）
@@ -38,14 +38,14 @@ function appendLog(entry) {
 function readConfig() {
   try {
     const fp = path.join(DATA_DIR, "data.json");
-    if (!fs.existsSync(fp)) return { enabled: true, mode: "always" };
+    if (!fs.existsSync(fp)) return { presentation: "card", mode: "always" };
     const data = JSON.parse(fs.readFileSync(fp, "utf-8"));
     return {
-      enabled: data.config?.enabled !== false,
+      presentation: data.config?.presentation === "ball" ? "ball" : data.config?.presentation === "off" ? "off" : "card",
       mode: data.config?.mode === "always" ? "always" : "auto"
     };
   } catch {
-    return { enabled: true, mode: "auto" };
+    return { presentation: "card", mode: "auto" };
   }
 }
 
@@ -57,8 +57,8 @@ const ALWAYS_NUDGE = "\n\n💡 请先调用 suggest_replies 工具生成推荐�
 const AUTO_NUDGE = "\n\n💡 如果你觉得这轮回复后用户可能还想继续聊：先调用 suggest_replies 工具生成推荐回复（在写正文之前），然后再写回复正文。";
 
 // system 消息（通道 A）
-const ALWAYS_SYSTEM = "（接个话）写正文之前，先调用 suggest_replies 工具生成推荐回复，然后再写正文。";
-const AUTO_SYSTEM = "（接个话）如果这轮回复后用户可能还想继续聊：写正文之前，先调用 suggest_replies 工具。";
+const ALWAYS_SYSTEM = "（解语花）写正文之前，先调用 suggest_replies 工具生成推荐回复，然后再写正文。";
+const AUTO_SYSTEM = "（解语花）如果这轮回复后用户可能还想继续聊：写正文之前，先调用 suggest_replies 工具。";
 
 function inject(event, cfg) {
   const isAlways = cfg.mode === "always";
@@ -89,13 +89,13 @@ function inject(event, cfg) {
 }
 
 export default function (pi) {
-  appendLog("[启动] 接个话注入扩展加载（context 事件模式）");
+  appendLog("[启动] 解语花注入扩展加载（context 事件模式）");
 
   pi.on("context", async (event) => {
     try {
       const cfg = readConfig();
-      if (!cfg.enabled) {
-        appendLog("[context] 插件已关闭，跳过");
+      if (cfg.presentation !== "card") {
+        appendLog(`[context] 已跳过（presentation=${cfg.presentation}）`);
         return;
       }
       const msgCount = event?.messages?.length || 0;

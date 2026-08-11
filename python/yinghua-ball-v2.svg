@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 落樱悬浮球 · 樱花 v2（在 v1 简笔基础上做加法：径向渐变 + 叠压暗缝 + 高光月牙 + 丰富花蕊） -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400" width="1200" height="1200">
+  <defs>
+    <!-- 径向渐变：中心浅粉 → 边缘深粉（光照立体感） -->
+    <radialGradient id="petalR" cx="50%" cy="50%" r="52%">
+      <stop offset="0%" stop-color="#fdf0f4"/>
+      <stop offset="48%" stop-color="#f6cbd8"/>
+      <stop offset="100%" stop-color="#e389a5"/>
+    </radialGradient>
+    <!-- 花心渐变：淡黄 → 蜜金 -->
+    <radialGradient id="coreR" cx="40%" cy="40%" r="65%">
+      <stop offset="0%" stop-color="#fdf4c6"/>
+      <stop offset="100%" stop-color="#edbd7e"/>
+    </radialGradient>
+  </defs>
+  <g transform="translate(200 200)">
+    <!-- 0. 底层叠压暗缝：深粉底瓣，比顶层略大，制造花瓣叠压的暗缝层次 -->
+    <g fill="#d97b95" opacity="0.85">
+      <path d="M 0 -14 Q -38 -30 -40 -78 Q -27 -103 0 -94 Q 27 -103 40 -78 Q 38 -30 0 -14 Z"/>
+      <path d="M 0 -14 Q -38 -30 -40 -78 Q -27 -103 0 -94 Q 27 -103 40 -78 Q 38 -30 0 -14 Z" transform="rotate(72)"/>
+      <path d="M 0 -14 Q -38 -30 -40 -78 Q -27 -103 0 -94 Q 27 -103 40 -78 Q 38 -30 0 -14 Z" transform="rotate(144)"/>
+      <path d="M 0 -14 Q -38 -30 -40 -78 Q -27 -103 0 -94 Q 27 -103 40 -78 Q 38 -30 0 -14 Z" transform="rotate(216)"/>
+      <path d="M 0 -14 Q -38 -30 -40 -78 Q -27 -103 0 -94 Q 27 -103 40 -78 Q 38 -30 0 -14 Z" transform="rotate(288)"/>
+    </g>
+    <!-- 1. 渐变花瓣：径向渐变填充 + 深粉描边 -->
+    <g fill="url(#petalR)" stroke="#c96d89" stroke-width="2.5" stroke-linejoin="round">
+      <path d="M 0 -12 Q -34 -28 -36 -74 Q -24 -96 0 -88 Q 24 -96 36 -74 Q 34 -28 0 -12 Z"/>
+      <path d="M 0 -12 Q -34 -28 -36 -74 Q -24 -96 0 -88 Q 24 -96 36 -74 Q 34 -28 0 -12 Z" transform="rotate(72)"/>
+      <path d="M 0 -12 Q -34 -28 -36 -74 Q -24 -96 0 -88 Q 24 -96 36 -74 Q 34 -28 0 -12 Z" transform="rotate(144)"/>
+      <path d="M 0 -12 Q -34 -28 -36 -74 Q -24 -96 0 -88 Q 24 -96 36 -74 Q 34 -28 0 -12 Z" transform="rotate(216)"/>
+      <path d="M 0 -12 Q -34 -28 -36 -74 Q -24 -96 0 -88 Q 24 -96 36 -74 Q 34 -28 0 -12 Z" transform="rotate(288)"/>
+    </g>
+    <!-- 2. 每瓣高光月牙：白粉弧线（釉面反光），随瓣旋转 -->
+    <g stroke="#fff6f9" stroke-width="3.2" fill="none" stroke-linecap="round" opacity="0.92">
+      <path d="M -17 -36 Q -9 -50 6 -56"/>
+      <path d="M -17 -36 Q -9 -50 6 -56" transform="rotate(72)"/>
+      <path d="M -17 -36 Q -9 -50 6 -56" transform="rotate(144)"/>
+      <path d="M -17 -36 Q -9 -50 6 -56" transform="rotate(216)"/>
+      <path d="M -17 -36 Q -9 -50 6 -56" transform="rotate(288)"/>
+    </g>
+    <!-- 3. 花心渐变圈 + 6 根花蕊 -->
+    <circle cx="0" cy="0" r="13" fill="url(#coreR)" stroke="#c96d89" stroke-width="2"/>
+    <g stroke="#b07a6a" stroke-width="2" stroke-linecap="round">
+      <line x1="0" y1="0" x2="-6" y2="-12"/>
+      <line x1="0" y1="0" x2="6" y2="-12"/>
+      <line x1="0" y1="0" x2="-11" y2="-5"/>
+      <line x1="0" y1="0" x2="11" y2="-5"/>
+      <line x1="0" y1="0" x2="-9" y2="8"/>
+      <line x1="0" y1="0" x2="9" y2="8"/>
+    </g>
+    <g fill="#e09a4e">
+      <circle cx="-6" cy="-12" r="2.2"/>
+      <circle cx="6" cy="-12" r="2.2"/>
+      <circle cx="-11" cy="-5" r="2.2"/>
+      <circle cx="11" cy="-5" r="2.2"/>
+      <circle cx="-9" cy="8" r="2.2"/>
+      <circle cx="9" cy="8" r="2.2"/>
+    </g>
+  </g>
+</svg>

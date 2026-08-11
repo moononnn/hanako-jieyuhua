@@ -1,4 +1,4 @@
-// 接个话 — 页面路由（服务端渲染完整 HTML，坑 41：客户端只绑事件不做 DOM 构建）
+// 解语花 — 页面路由（服务端渲染完整 HTML，坑 41：客户端只绑事件不做 DOM 构建）
 // /suggest  — 推荐卡片页（渲染在消息流回复末尾）
 // /settings — 设置页（插件抽屉入口）
 //
@@ -44,7 +44,7 @@ function renderSuggestPage(c, ctx, dataDir) {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>接个话</title>
+<title>解语花</title>
 ${hanaCss ? `<link rel="stylesheet" href="${escapeAttr(hanaCss)}">` : ""}
 <style>
   :root {
@@ -139,7 +139,7 @@ ${hanaCss ? `<link rel="stylesheet" href="${escapeAttr(hanaCss)}">` : ""}
 </head>
 <body data-hana-theme="${escapeAttr(theme)}" data-surface="card">
   <div class="dgh-head">
-    <span class="dgh-badge">接个话</span>
+    <span class="dgh-badge">解语花</span>
     <span class="dgh-hint">${hintText}</span>
   </div>
   <div class="dgh-list" id="dgh-list">
@@ -174,6 +174,7 @@ function renderSettingsPage(c, ctx, dataDir) {
 
   const clientJs = buildSettingsClientJs(apiBase, {
     version,
+    presentation: cfg.presentation || "card",
     mode: cfg.mode,
     count: cfg.count,
     action: cfg.action,
@@ -202,7 +203,7 @@ function renderSettingsPage(c, ctx, dataDir) {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>接个话设置</title>
+<title>解语花设置</title>
 ${hanaCss ? `<link rel="stylesheet" href="${escapeAttr(hanaCss)}">` : ""}
 <style>
   :root {
@@ -287,6 +288,15 @@ ${hanaCss ? `<link rel="stylesheet" href="${escapeAttr(hanaCss)}">` : ""}
   .dgh-msg.ok { color: var(--dgh-ok); }
   .dgh-msg.err { color: var(--dgh-err); }
   .dgh-hidden { display: none; }
+  /* 解语花悬浮球状态区 */
+  .dgh-ball-box {
+    margin-top: 8px;
+    background: var(--dgh-accent-light);
+    border: 1px dashed var(--dgh-accent);
+    border-radius: 12px;
+    padding: 10px 12px;
+  }
+  .dgh-ball-status { font-size: 12px; color: var(--dgh-sub); }
   .dgh-foot { font-size: 11px; color: var(--dgh-sub); text-align: center; margin-top: 6px; }
   /* 右上角按钮组（仿表情包 home-text-btn） */
   .dgh-topbar { display: flex; align-items: center; gap: 12px; margin-bottom: 2px; flex-wrap: wrap; }
@@ -406,7 +416,7 @@ ${hanaCss ? `<link rel="stylesheet" href="${escapeAttr(hanaCss)}">` : ""}
 </head>
 <body data-hana-theme="${escapeAttr(theme)}" data-surface="page">
   <div class="dgh-topbar">
-    <h1>接个话</h1>
+    <h1>解语花</h1>
     <span class="dgh-ver">v${escapeHtml(version)}</span>
     <span class="spacer"></span>
     <button class="dgh-top-btn" id="dgh-model-open" type="button" title="生成推荐的模型配置">模型设置</button>
@@ -417,7 +427,7 @@ ${hanaCss ? `<link rel="stylesheet" href="${escapeAttr(hanaCss)}">` : ""}
 
   ${cfg.guideDismissed ? "" : `
   <div class="dgh-guide" id="dgh-guide">
-    <div class="dgh-guide-title">第一次用接个话？</div>
+    <div class="dgh-guide-title">第一次用解语花？</div>
     <div class="dgh-guide-body">聊天时 AI 回复下方会出现一张小卡片，上面是几条你可能想说的话，点一下复制（或直接发送），不用自己打字。默认已经开了，直接去聊就行。<br>生成推荐需要一个模型，默认已跟随当前聊天框的助手模型，不用额外配置。想换模型或单独配一个更省钱的，点右上角「模型设置」。</div>
     <div class="dgh-row">
       <button class="dgh-btn ghost" id="dgh-guide-close" type="button">知道了</button>
@@ -425,9 +435,17 @@ ${hanaCss ? `<link rel="stylesheet" href="${escapeAttr(hanaCss)}">` : ""}
   </div>`}
 
   <div class="dgh-card">
-    <div class="dgh-card-title">总开关</div>
-    ${radio("enabled", "true", cfg.enabled !== false, "开启", "AI 回复后出现推荐卡片")}
-    ${radio("enabled", "false", cfg.enabled === false, "关闭", "不生成任何推荐")}
+    <div class="dgh-card-title">展示方式</div>
+    ${radio("presentation", "card", cfg.presentation !== "ball" && cfg.presentation !== "off", "回复卡片", "AI 回复后，推荐卡片出现在回复下方（原来的方式）")}
+    ${radio("presentation", "ball", cfg.presentation === "ball", "解语花", "桌面一朵会接话的樱花，点开面板直接挑话发出去，不占对话流")}
+    ${radio("presentation", "off", cfg.presentation === "off", "关闭", "不生成任何推荐")}
+    <div class="dgh-ball-box dgh-hidden" id="dgh-ball-box">
+      <div class="dgh-ball-status" id="dgh-ball-status">检测中…</div>
+      <div class="dgh-row" style="margin-top:6px">
+        <button class="dgh-btn" id="dgh-ball-activate" type="button" style="display:none">激活解语花</button>
+        <button class="dgh-btn ghost" id="dgh-ball-stop" type="button" style="display:none">停止解语花</button>
+      </div>
+    </div>
   </div>
 
   <div class="dgh-card">
@@ -475,7 +493,7 @@ ${hanaCss ? `<link rel="stylesheet" href="${escapeAttr(hanaCss)}">` : ""}
     ${radio("action", "copy", cfg.action === "copy", "复制", "复制到剪贴板，自己粘贴后再发")}
   </div>
 
-  <div class="dgh-foot">接个话 · 推荐由模型生成，只是建议，发不发你说了算</div>
+  <div class="dgh-foot">解语花 · 推荐由模型生成，只是建议，发不发你说了算</div>
 
   <!-- 模型设置弹窗 -->
   <div class="dgh-modal-overlay dgh-hidden" id="dgh-modal">
@@ -960,12 +978,72 @@ function buildSettingsClientJs(apiBase, state) {
     });
   });
 
-  // 即时生效：总开关 / 时机 / 发送方式 改动即存
-  document.querySelectorAll("input[name=enabled]").forEach(function(r){
+  // 即时生效：展示方式 / 时机 / 发送方式 改动即存
+  // 切到解语花 → 自动启动；切走 → 自动停止
+  function syncBallBox() {
+    var box = $("dgh-ball-box");
+    if (!box) return;
+    var isBall = radioValue("presentation") === "ball";
+    box.classList.toggle("dgh-hidden", !isBall);
+    if (isBall) refreshBallStatus();
+  }
+
+  function refreshBallStatus() {
+    var st = $("dgh-ball-status");
+    var act = $("dgh-ball-activate");
+    var stop = $("dgh-ball-stop");
+    if (!st) return;
+    apiGet("/ball/status").then(function(res){
+      if (res && res.ok && res.running) {
+        st.textContent = "解语花运行中 · " + (res.python || "");
+        if (act) act.style.display = "none";
+        if (stop) stop.style.display = "";
+      } else {
+        var err = res && res.error ? ("（" + res.error + "）") : "";
+        st.textContent = "解语花未在运行" + err;
+        if (act) act.style.display = "";
+        if (stop) stop.style.display = "none";
+      }
+    }).catch(function(){
+      st.textContent = "状态查询失败";
+    });
+  }
+
+  document.querySelectorAll("input[name=presentation]").forEach(function(r){
     r.addEventListener("change", function(){
-      saveField({ enabled: radioValue("enabled") !== "false" });
+      var v = radioValue("presentation") || "card";
+      saveField({ presentation: v });
+      if (v === "ball") {
+        apiPost("/ball/start", {}).then(function(res){
+          if (res && res.ok) showToast("解语花已激活");
+          else showToast(((res && res.error) || "解语花启动失败"), "err");
+          refreshBallStatus();
+        }).catch(function(){ showToast("解语花启动失败", "err"); refreshBallStatus(); });
+      } else {
+        apiPost("/ball/stop", {}).then(function(){
+          refreshBallStatus();
+        }).catch(function(){ refreshBallStatus(); });
+      }
+      syncBallBox();
     });
   });
+  var ballAct = $("dgh-ball-activate");
+  if (ballAct) ballAct.addEventListener("click", function(){
+    apiPost("/ball/start", {}).then(function(res){
+      if (res && res.ok) showToast("解语花已激活");
+      else showToast(((res && res.error) || "解语花启动失败"), "err");
+      refreshBallStatus();
+    }).catch(function(){ showToast("竹简启动失败", "err"); refreshBallStatus(); });
+  });
+  var ballStop = $("dgh-ball-stop");
+  if (ballStop) ballStop.addEventListener("click", function(){
+    apiPost("/ball/stop", {}).then(function(){
+      showToast("竹简已停止");
+      refreshBallStatus();
+    }).catch(function(){ showToast("停止失败", "err"); refreshBallStatus(); });
+  });
+  syncBallBox();
+
   document.querySelectorAll("input[name=mode]").forEach(function(r){
     r.addEventListener("change", function(){
       saveField({ mode: radioValue("mode") || "auto" });
@@ -1088,7 +1166,7 @@ function buildSettingsClientJs(apiBase, state) {
   // ── 反馈（GitHub Issues，弹窗被拦时降级复制链接） ──
   var fbBtn = $("dgh-feedback");
   if (fbBtn) fbBtn.addEventListener("click", function(){
-    var issueUrl = "https://github.com/moononnn/hanako--jiegehua/issues";
+    var issueUrl = "https://github.com/moononnn/hanako-jieyuhua/issues";
     var opened = null;
     try { opened = window.open(issueUrl, "_blank"); } catch (e) {}
     if (!opened) {

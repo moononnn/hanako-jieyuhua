@@ -1,4 +1,4 @@
-// 接个话 — 核心工具：生成推荐回复
+// 解语花 — 核心工具：生成推荐回复
 // agent 在回复末尾调用，返回 plugin_card 渲染在回复末尾
 // 推荐文本存 pending，卡片 iframe 通过 r 参数取用
 
@@ -70,8 +70,13 @@ export async function execute(input, ctx) {
   const dataDir = ctx.dataDir;
   const cfg = getConfig(dataDir);
 
-  if (cfg.enabled === false) {
-    return { content: [{ type: "text", text: "接个话已关闭" }] };
+  // 展示模式防线（2026-08-10）：observer 只拦「引导层」，模型仍可能自发调用本工具。
+  // 非卡片模式（竹简/关闭）下绝不返回卡片数据，从根上保证回复里不会出现推荐卡片。
+  if (cfg.presentation !== "card") {
+    const label = cfg.presentation === "ball" ? "竹简" : "关闭";
+    return {
+      content: [{ type: "text", text: `（解语花当前是${label}模式，不生成推荐卡片）` }]
+    };
   }
 
   try {
@@ -107,7 +112,7 @@ export async function execute(input, ctx) {
 
     const prompt = [
       "【红线】所有输出必须是「用户」在对话中对「助手」说的话。第一人称「我」、直接对助手喊，不要生成助手口吻、引导问句、旁观者描述这种不是用户在说的话。",
-      "你是「接个话」推荐引擎，你是用户的「嘴替」。",
+      "你是「解语花」推荐引擎，你是用户的「嘴替」。",
       "下面对话中，「用户」是发消息的人，「助手」是回复的人。",
       `你的任务：生成 ${cfg.count} 条「用户接下来准备发给助手的话」。`,
       "硬性要求：",
@@ -157,12 +162,12 @@ export async function execute(input, ctx) {
           sessionPath: ctx.sessionPath || sessionPath || undefined,
           route: "/suggest?r=" + encodeURIComponent(rid),
           aspectRatio: "400:" + estimateCardHeight(items.length),
-          title: "接个话"
+          title: "解语花"
         }
       }
     };
   } catch (err) {
-    ctx.log?.error?.("[接个话] 生成推荐失败", { error: err?.message || String(err) });
+    ctx.log?.error?.("[解语花] 生成推荐失败", { error: err?.message || String(err) });
     return { content: [{ type: "text", text: `推荐生成失败：${err?.message || String(err)}` }] };
   }
 }

@@ -1,9 +1,9 @@
 {
   "manifestVersion": 1,
   "id": "jiegehua",
-  "name": "接个话",
-  "version": "0.2.0",
-  "description": "AI 回复完之后，帮你生成几条推荐回复，点一下就能接上话。",
+  "name": "解语花",
+  "version": "0.4.0",
+  "description": "AI 回复完之后，帮你生成几条推荐回复，点一下就能接上话。可选回复卡片或桌面解语花悬浮球（一朵会接话的樱花）。",
   "minAppVersion": "0.159.0",
   "trust": "full-access",
   "install": {
@@ -21,7 +21,7 @@
   },
   "contributes": {
     "page": {
-      "title": "接个话",
+      "title": "解语花",
       "route": "/settings",
       "icon": "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><path d='M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z'/><path d='M9 10h6'/><path d='M9 13h4'/></svg>"
     },

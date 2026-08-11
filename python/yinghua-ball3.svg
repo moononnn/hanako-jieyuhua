@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 落樱悬浮球 · 方案 v3：在简笔樱花上做加法
+     立体感：花瓣径向渐变（根浅尖深）+ 瓣内白色高光 + 根部叠压阴影 + 花心立体渐变
+     丰富感：光晕 + 8 根花蕊 + 花心高光
+     保留：墨色细描边、手帐简笔骨架 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400" width="400" height="400">
+  <defs>
+    <!-- 柔光晕（最底层）：花朵外圈淡粉，让花朵在桌面上有"浮着"的柔和感 -->
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0%" stop-color="#f6a8c0" stop-opacity="0.30"/>
+      <stop offset="55%" stop-color="#f6a8c0" stop-opacity="0.10"/>
+      <stop offset="100%" stop-color="#f6a8c0" stop-opacity="0"/>
+    </radialGradient>
+    <!-- 花瓣渐变（径向，userSpaceOnUse 以花心为原点）：根部浅 → 尖端深，方向随花瓣位置自然 -->
+    <radialGradient id="petalG" cx="0" cy="0" r="150" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#fdecef"/>
+      <stop offset="45%" stop-color="#f8c9d6"/>
+      <stop offset="78%" stop-color="#ee9cb2"/>
+      <stop offset="100%" stop-color="#e78aa3"/>
+    </radialGradient>
+    <!-- 花心立体渐变（高光偏左上） -->
+    <radialGradient id="coreG" cx="0.35" cy="0.35" r="0.75">
+      <stop offset="0%" stop-color="#f0a0b6"/>
+      <stop offset="70%" stop-color="#da7c97"/>
+      <stop offset="100%" stop-color="#c26a82"/>
+    </radialGradient>
+  </defs>
+
+  <!-- 光晕 -->
+  <circle cx="200" cy="200" r="150" fill="url(#glow)"/>
+
+  <g transform="translate(200 200)">
+    <!-- 5 瓣：径向渐变填充 + 墨色细描边（手帐骨架保留） -->
+    <g fill="url(#petalG)" stroke="#3f4a42" stroke-width="3" stroke-linejoin="round">
+      <path d="M 0 -8 Q -32 -25 -34 -68 Q -22 -90 0 -82 Q 22 -90 34 -68 Q 32 -25 0 -8 Z"/>
+      <path d="M 0 -8 Q -32 -25 -34 -68 Q -22 -90 0 -82 Q 22 -90 34 -68 Q 32 -25 0 -8 Z" transform="rotate(72)"/>
+      <path d="M 0 -8 Q -32 -25 -34 -68 Q -22 -90 0 -82 Q 22 -90 34 -68 Q 32 -25 0 -8 Z" transform="rotate(144)"/>
+      <path d="M 0 -8 Q -32 -25 -34 -68 Q -22 -90 0 -82 Q 22 -90 34 -68 Q 32 -25 0 -8 Z" transform="rotate(216)"/>
+      <path d="M 0 -8 Q -32 -25 -34 -68 Q -22 -90 0 -82 Q 22 -90 34 -68 Q 32 -25 0 -8 Z" transform="rotate(288)"/>
+    </g>
+
+    <!-- 根部叠压阴影：花心周围一圈深粉暗部，模拟花瓣交叠的层次 -->
+    <circle cx="0" cy="0" r="17" fill="#e38aa3" opacity="0.42"/>
+
+    <!-- 瓣内高光：每瓣内侧一条白色弧，做出"花瓣鼓起"的立体感 -->
+    <g stroke="#ffffff" stroke-width="4.5" stroke-linecap="round" fill="none" opacity="0.55">
+      <path d="M -20 -32 Q -12 -56 0 -66"/>
+      <path d="M -20 -32 Q -12 -56 0 -66" transform="rotate(72)"/>
+      <path d="M -20 -32 Q -12 -56 0 -66" transform="rotate(144)"/>
+      <path d="M -20 -32 Q -12 -56 0 -66" transform="rotate(216)"/>
+      <path d="M -20 -32 Q -12 -56 0 -66" transform="rotate(288)"/>
+    </g>
+
+    <!-- 花蕊：8 根墨色细丝 + 深粉花药点（比原来的 4 根丰富，仍克制） -->
+    <g stroke="#3f4a42" stroke-width="1.6" stroke-linecap="round" fill="none">
+      <line x1="0" y1="0" x2="0" y2="-34"/>
+      <line x1="0" y1="0" x2="24" y2="-24"/>
+      <line x1="0" y1="0" x2="34" y2="0"/>
+      <line x1="0" y1="0" x2="24" y2="24"/>
+      <line x1="0" y1="0" x2="0" y2="34"/>
+      <line x1="0" y1="0" x2="-24" y2="24"/>
+      <line x1="0" y1="0" x2="-34" y2="0"/>
+      <line x1="0" y1="0" x2="-24" y2="-24"/>
+    </g>
+    <g fill="#c26a82">
+      <circle cx="0" cy="-34" r="2.6"/>
+      <circle cx="24" cy="-24" r="2.6"/>
+      <circle cx="34" cy="0" r="2.6"/>
+      <circle cx="24" cy="24" r="2.6"/>
+      <circle cx="0" cy="34" r="2.6"/>
+      <circle cx="-24" cy="24" r="2.6"/>
+      <circle cx="-34" cy="0" r="2.6"/>
+      <circle cx="-24" cy="-24" r="2.6"/>
+    </g>
+
+    <!-- 花心：立体渐变圆，盖住花蕊根部 -->
+    <circle cx="0" cy="0" r="14" fill="url(#coreG)" stroke="#3f4a42" stroke-width="2.5"/>
+    <!-- 花心左上高光小点 -->
+    <circle cx="-4" cy="-4" r="4" fill="#ffffff" opacity="0.4"/>
+  </g>
+</svg>

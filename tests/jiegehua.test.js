@@ -19,7 +19,7 @@ import {
   markPendingUsed
 } from "../lib/data.js";
 import { parseSuggestions, encryptKey, decryptKey, extractResponseText, redactSecrets, validateBaseUrl } from "../lib/llm.js";
-import { buildStyleLines } from "../tools/suggest_replies.js";
+import { buildStyleLines, execute as executeSuggest } from "../tools/suggest_replies.js";
 import { compareVersions } from "../lib/version.js";
 import { buildContextText } from "../lib/session.js";
 
@@ -34,9 +34,8 @@ test("normalizeConfig 返回默认值（空输入）", () => {
   assert.deepEqual(cfg, DEFAULT_CONFIG);
 });
 
-test("新用户默认值：开启 + 每次都推荐 + 3 条 + 点击复制 + 指引未关闭", () => {
+test("新用户默认值：每次都推荐 + 3 条 + 点击复制 + 指引未关闭", () => {
   const cfg = normalizeConfig(null);
-  assert.equal(cfg.enabled, true);
   assert.equal(cfg.mode, "always");
   assert.equal(cfg.count, 3);
   assert.equal(cfg.action, "copy");
@@ -53,13 +52,11 @@ test("normalizeConfig guideDismissed 透传，非法值忽略", () => {
 
 test("normalizeConfig 接受合法值，忽略非法值", () => {
   const cfg = normalizeConfig({
-    enabled: false,
     mode: "always",
     count: 4,
     action: "copy",
     model: { source: "custom", custom: { baseUrl: "https://x.example", apiKey: "enc:abc", model: "m1" } }
   });
-  assert.equal(cfg.enabled, false);
   assert.equal(cfg.mode, "always");
   assert.equal(cfg.count, 4);
   assert.equal(cfg.action, "copy");
@@ -403,4 +400,25 @@ test("cleanContextText 清理成对【隐藏注入块】且保留正常内容", 
   ]);
   assert.ok(!out.includes("隐藏内容"));
   assert.ok(out.includes("晚上吃什么"));
+});
+
+// ═══ 展示模式防线（2026-08-10）：非卡片模式绝不返回卡片 ═══
+// observer 只拦「引导层」，模型仍可能自发调用工具；工具层必须兜底
+
+test("竹简模式下 execute 不返回卡片，只返回提示文本", async () => {
+  const dir = tmpDir();
+  saveData(dir, { config: { presentation: "ball", mode: "always", count: 3, action: "copy", styles: [] } });
+  const out = await executeSuggest({}, { dataDir: dir });
+  assert.ok(out.content && out.content.length > 0);
+  assert.ok(out.content[0].text.includes("竹简"));
+  assert.equal(out.details, undefined);
+});
+
+test("关闭模式下 execute 不返回卡片", async () => {
+  const dir = tmpDir();
+  saveData(dir, { config: { presentation: "off", mode: "always", count: 3, action: "copy", styles: [] } });
+  const out = await executeSuggest({}, { dataDir: dir });
+  assert.ok(out.content && out.content.length > 0);
+  assert.ok(out.content[0].text.includes("关闭"));
+  assert.equal(out.details, undefined);
 });

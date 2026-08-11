@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 30 140" width="30" height="140">
+  <defs>
+    <linearGradient id="bambooSlip" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#5e9a84"/>
+      <stop offset="0.5" stop-color="#8cbfae"/>
+      <stop offset="1" stop-color="#5e9a84"/>
+    </linearGradient>
+  </defs>
+
+  <!-- 单片竹青竹简（半展开/全展开时单独排开用） -->
+  <rect x="0" y="0" width="30" height="140" rx="3" fill="url(#bambooSlip)" stroke="#3f6b58" stroke-width="2"/>
+  <!-- 顶部竹节横纹 -->
+  <line x1="0" y1="24" x2="30" y2="24" stroke="#3f6b58" stroke-width="1.4" opacity="0.5"/>
+  <!-- 中部竹节横纹 -->
+  <line x1="0" y1="70" x2="30" y2="70" stroke="#3f6b58" stroke-width="1.4" opacity="0.5"/>
+  <!-- 底部竹节横纹 -->
+  <line x1="0" y1="116" x2="30" y2="116" stroke="#3f6b58" stroke-width="1.4" opacity="0.5"/>
+  <!-- 米白高光带 -->
+  <line x1="7" y1="0" x2="7" y2="140" stroke="#fdf6e3" stroke-width="1.2" opacity="0.5"/>
+</svg>
