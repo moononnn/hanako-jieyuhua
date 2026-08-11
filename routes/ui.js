@@ -1033,12 +1033,12 @@ function buildSettingsClientJs(apiBase, state) {
       if (res && res.ok) showToast("解语花已激活");
       else showToast(((res && res.error) || "解语花启动失败"), "err");
       refreshBallStatus();
-    }).catch(function(){ showToast("竹简启动失败", "err"); refreshBallStatus(); });
+    }).catch(function(){ showToast("解语花启动失败", "err"); refreshBallStatus(); });
   });
   var ballStop = $("dgh-ball-stop");
   if (ballStop) ballStop.addEventListener("click", function(){
     apiPost("/ball/stop", {}).then(function(){
-      showToast("竹简已停止");
+      showToast("解语花已停止");
       refreshBallStatus();
     }).catch(function(){ showToast("停止失败", "err"); refreshBallStatus(); });
   });

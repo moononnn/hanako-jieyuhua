@@ -143,7 +143,7 @@ export default function registerPluginApiRoutes(app, ctx) {
 
   // ─── 直接发送（点击推荐 → 伪装成用户消息提交到会话） ───
   // 协议：只传 index（0~3），text 由服务端从推荐列表取（防注入：rid 泄露也不能塞任意内容）
-  // 共用 lib/send.js claimAndSend（卡片页与竹简悬浮球同一套原子逻辑）
+  // 共用 lib/send.js claimAndSend（卡片页与解语花悬浮球同一套原子逻辑）
   app.post("/api/apply", async (c) => {
     try {
       const body = await c.req.json().catch(() => ({}));
@@ -333,7 +333,7 @@ export default function registerPluginApiRoutes(app, ctx) {
   });
 
   // ────────────────────────────────────────────
-  //  竹简悬浮球 — 启动 / 停止 / 状态 / 依赖检查
+  //  解语花悬浮球 — 启动 / 停止 / 状态 / 依赖检查
   // ────────────────────────────────────────────
   app.post("/api/ball/start", async (c) => {
     const res = startZhujian(ctx);

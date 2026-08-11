@@ -405,12 +405,12 @@ test("cleanContextText 清理成对【隐藏注入块】且保留正常内容", 
 // ═══ 展示模式防线（2026-08-10）：非卡片模式绝不返回卡片 ═══
 // observer 只拦「引导层」，模型仍可能自发调用工具；工具层必须兜底
 
-test("竹简模式下 execute 不返回卡片，只返回提示文本", async () => {
+test("悬浮球模式下 execute 不返回卡片，只返回提示文本", async () => {
   const dir = tmpDir();
   saveData(dir, { config: { presentation: "ball", mode: "always", count: 3, action: "copy", styles: [] } });
   const out = await executeSuggest({}, { dataDir: dir });
   assert.ok(out.content && out.content.length > 0);
-  assert.ok(out.content[0].text.includes("竹简"));
+  assert.ok(out.content[0].text.includes("悬浮球"));
   assert.equal(out.details, undefined);
 });
 

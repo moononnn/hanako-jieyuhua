@@ -89,6 +89,7 @@ HOVER_LEAVE_DELAY = 0.24
 # ── 弹出窗垂直锚点（花朵中心位于弹出窗高度中的比例，0.5=居中） ──
 PANEL_ANCHOR_RATIO = 0.38   # 左键推荐面板：花在面板上部，面板主体在花下方（实机确认）
 MENU_ANCHOR_RATIO = 0.33    # 右键发送浮签：主体在花下方，与面板视觉呼应
+TARGET_SESSION_LIMIT = 5    # 目标选择只展示最近活跃的 5 个窗口，避免面板过长
 
 # ── 手帐风配色：保留落樱自己的薄荷绿与粉色，明暗随 Hana 切换 ──
 DARK_THEME_IDS = {"midnight", "midnight-contrast"}
@@ -372,6 +373,253 @@ class SendModeMenu(QFrame):
 
 
 # ─────────────────────────────
+#  推荐目标选择浮签（面板右上角下拉）
+# ─────────────────────────────
+class TargetMenu(QFrame):
+    """最近对话（默认）/ 固定指定会话。
+    数据来自代理 /sessions；选择通过 /pin 写入，重启后仍保持。"""
+
+    sessions_ready = pyqtSignal(object)
+
+    def __init__(self, panel):
+        super().__init__(panel)
+        self.panel = panel
+        self.ball = panel.ball
+        self.sessions = []
+        self.loading_sessions = False
+        self.sessions_error = ""
+        self._request_seq = 0
+        self.view_mode = "pinned" if self.ball.target_mode == "pinned" else "auto"
+        self.sessions_ready.connect(self._apply_sessions)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setObjectName("targetMenu")
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._build()
+
+    def _build(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 11, 12, 11)
+        root.setSpacing(6)
+
+        title = QLabel("推荐回复参考哪段对话？")
+        title.setObjectName("menuTitle")
+        root.addWidget(title)
+
+        mode_row = QHBoxLayout()
+        mode_row.setSpacing(6)
+        self.btn_auto = QPushButton("自动判断")
+        self.btn_auto.setObjectName("modeChoice")
+        self.btn_auto.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_auto.clicked.connect(self._pick_auto)
+        mode_row.addWidget(self.btn_auto)
+        self.btn_fixed = QPushButton("自己选择")
+        self.btn_fixed.setObjectName("modeChoice")
+        self.btn_fixed.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_fixed.clicked.connect(self._show_fixed)
+        mode_row.addWidget(self.btn_fixed)
+        root.addLayout(mode_row)
+
+        self.lbl_mode_hint = QLabel("")
+        self.lbl_mode_hint.setObjectName("menuSub")
+        self.lbl_mode_hint.setWordWrap(True)
+        root.addWidget(self.lbl_mode_hint)
+
+        self.list_host = QWidget(self)
+        self.list_host.setObjectName("targetListHost")
+        self.list_box = QVBoxLayout(self.list_host)
+        self.list_box.setContentsMargins(0, 0, 0, 0)
+        self.list_box.setSpacing(5)
+        root.addWidget(self.list_host)
+        self.apply_theme()
+
+    def apply_theme(self):
+        c = THEME_COLORS[self.ball.theme_mode]
+        self.setStyleSheet(f"""
+            #targetMenu {{ background: transparent; border: none; font-family: "LXGW WenKai", "Microsoft YaHei UI"; }}
+            QLabel {{ background: transparent; color: {c['ink']}; }}
+            QLabel#menuTitle {{ font-size: 13px; font-weight: 700; color: {c['accent_deep']}; }}
+            QLabel#menuSub {{ font-size: 10px; color: {c['sub']}; padding-bottom: 2px; }}
+            QPushButton#modeChoice {{
+                min-height: 32px; padding: 0 10px;
+                color: {c['sub']}; background: {c['surface']};
+                border: 1px solid {c['border']}; border-radius: 10px; font-size: 12px;
+            }}
+            QPushButton#modeChoice:hover {{ color: {c['accent_deep']}; background: {c['surface_alt']}; border-color: {c['accent']}; }}
+            QPushButton#modeChoice[active="true"] {{
+                color: {c['accent_text']}; background: {c['accent']};
+                border-color: {c['accent']}; font-weight: 600;
+            }}
+            QWidget#targetListHost {{ background: transparent; border: none; }}
+            QPushButton#sessionItem {{
+                min-height: 30px; max-height: 30px; text-align: left; padding: 0 9px;
+                color: {c['ink']}; background: {c['surface']};
+                border: 1px solid {c['border']}; border-radius: 10px; font-size: 11px;
+            }}
+            QPushButton#sessionItem:hover {{ background: {c['surface_alt']}; border-color: {c['accent']}; }}
+            QPushButton#sessionItem[active="true"] {{
+                color: {c['accent_deep']}; border-color: {c['accent']};
+                background: {c['surface_alt']};
+            }}
+        """)
+        self._sync_ui()
+
+    def _clear_list(self):
+        while self.list_box.count():
+            item = self.list_box.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+
+    def _sync_ui(self):
+        auto_on = self.view_mode == "auto"
+        self.btn_auto.setProperty("active", "true" if auto_on else "false")
+        self.btn_fixed.setProperty("active", "false" if auto_on else "true")
+        self.btn_auto.style().unpolish(self.btn_auto)
+        self.btn_auto.style().polish(self.btn_auto)
+        self.btn_fixed.style().unpolish(self.btn_fixed)
+        self.btn_fixed.style().polish(self.btn_fixed)
+        self.lbl_mode_hint.setText(
+            "刷新时自动判断最近活跃的对话" if auto_on
+            else "从下面最近活跃的 5 个对话中固定一个"
+        )
+        self.list_host.setVisible(not auto_on)
+        self._clear_list()
+        if self.loading_sessions:
+            lbl = QLabel("正在读取对话列表…")
+            lbl.setObjectName("menuSub")
+            lbl.setStyleSheet(f"color: {THEME_COLORS[self.ball.theme_mode]['sub']}; font-size: 11px;")
+            self.list_box.addWidget(lbl)
+            return
+        if self.sessions_error:
+            lbl = QLabel(self.sessions_error)
+            lbl.setObjectName("menuSub")
+            lbl.setStyleSheet(f"color: {THEME_COLORS[self.ball.theme_mode]['sub']}; font-size: 11px;")
+            self.list_box.addWidget(lbl)
+            return
+        if not self.sessions:
+            lbl = QLabel("还没读取到可选对话")
+            lbl.setObjectName("menuSub")
+            lbl.setStyleSheet(f"color: {THEME_COLORS[self.ball.theme_mode]['sub']}; font-size: 11px;")
+            self.list_box.addWidget(lbl)
+            return
+        for s in self.sessions:
+            name = s.get("agentName") or s.get("agentId") or "未命名助手"
+            title = (s.get("title") or "未命名对话").strip()
+            ts = s.get("lastUserTime") or 0
+            when = time.strftime("%H:%M", time.localtime(ts / 1000)) if ts else ""
+            meta = f"{name} · {when}" if when else name
+            btn = QPushButton()
+            btn.setObjectName("sessionItem")
+            btn.setText(btn.fontMetrics().elidedText(title, Qt.TextElideMode.ElideRight, 246))
+            btn.setToolTip(f"{title}\n{meta}")
+            btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setProperty("active", "true" if (self.ball.pinned_target and self.ball.pinned_target.get("sessionPath") == s.get("sessionPath")) else "false")
+            btn.clicked.connect(lambda checked=False, s=s: self._pick(s))
+            self.list_box.addWidget(btn)
+        self.list_box.addStretch(1)
+
+    def _show_fixed(self):
+        self.view_mode = "pinned"
+        self._sync_ui()
+        self.panel._resize_after_target_change()
+
+    def _pick_auto(self):
+        self._request_seq += 1
+        self.panel.invalidate_target_sync()
+        try:
+            result = api_post("/pin", {}, timeout=5)
+            if not result.get("ok"):
+                raise RuntimeError(result.get("error") or "切换失败")
+        except Exception:
+            self.lbl_mode_hint.setText("切换失败，稍后再试")
+            self.panel._flash("切换失败，原来的选择没有改变")
+            return
+        self.view_mode = "auto"
+        self.ball.target_mode = "auto"
+        self.ball.pinned_target = None
+        self.ball.target_title = ""
+        self.panel._update_target()
+        self.panel._flash("已改为自动判断活跃窗口 ✓")
+        self.panel._set_target_selector_visible(False)
+
+    def _pick(self, s):
+        self._request_seq += 1
+        self.panel.invalidate_target_sync()
+        try:
+            result = api_post("/pin", {
+                "sessionPath": s.get("sessionPath") or "",
+                "agentId": s.get("agentId") or "",
+                "title": s.get("title") or "",
+            }, timeout=5)
+            if not result.get("ok"):
+                raise RuntimeError(result.get("error") or "固定失败")
+        except Exception:
+            self.lbl_mode_hint.setText("固定失败，原来的选择没有改变")
+            self.panel._flash("固定失败，原来的选择没有改变")
+            return
+        self.view_mode = "pinned"
+        self.ball.target_mode = "pinned"
+        self.ball.pinned_target = {"sessionPath": s.get("sessionPath") or "", "title": s.get("title") or ""}
+        self.ball.target_name = s.get("agentName") or s.get("agentId") or ""
+        self.ball.target_title = s.get("title") or ""
+        self.panel._update_target()
+        self.panel._flash("已固定这段对话 ✓")
+        self.panel._set_target_selector_visible(False)
+
+    def refresh_sessions_async(self):
+        self._request_seq += 1
+        request_seq = self._request_seq
+        self.loading_sessions = True
+        self.sessions_error = ""
+        self._sync_ui()
+
+        def worker():
+            payload = {"seq": request_seq, "sessions": [], "mode": self.ball.target_mode, "pinned": self.ball.pinned_target, "error": "读取失败，关闭后重开再试"}
+            try:
+                data = api_get("/sessions", timeout=5)
+                if data.get("ok"):
+                    payload = {
+                        "seq": request_seq,
+                        "sessions": data.get("sessions") or [],
+                        "mode": "pinned" if data.get("mode") == "pinned" else "auto",
+                        "pinned": data.get("pinned"),
+                        "error": "",
+                    }
+            except Exception:
+                pass
+            try:
+                self.sessions_ready.emit(payload)
+            except RuntimeError:
+                pass
+
+        threading.Thread(target=worker, daemon=True, name="zhujian-targetlist").start()
+
+    def _apply_sessions(self, payload):
+        if payload.get("seq") != self._request_seq:
+            return
+        self.loading_sessions = False
+        self.sessions_error = payload.get("error") or ""
+        self.sessions = (payload.get("sessions") or [])[:TARGET_SESSION_LIMIT]
+        self.ball.target_mode = payload.get("mode") or "auto"
+        self.ball.pinned_target = payload.get("pinned")
+        self.view_mode = "pinned" if self.ball.target_mode == "pinned" else self.view_mode
+        self.apply_theme()
+        self.panel._update_target()
+        self.panel._resize_after_target_change()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        c = THEME_COLORS[self.ball.theme_mode]
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QColor(c["border"]))
+        painter.setBrush(QColor(c["panel"]))
+        painter.drawRoundedRect(self.rect().adjusted(1, 1, -1, -1), 16, 16)
+        painter.end()
+
+
+# ─────────────────────────────
 #  落樱悬浮球
 # ─────────────────────────────
 class ZhujianBall(QWidget):
@@ -394,6 +642,9 @@ class ZhujianBall(QWidget):
         self.action = self.state.get("action") or "copy"
         self.cached = None
         self.target_name = ""
+        self.target_title = ""
+        self.target_mode = "auto"    # auto=跟随最近 / pinned=固定指定会话
+        self.pinned_target = None    # {sessionPath, agentId, title} 或 None
         self.theme_mode = read_hana_theme_mode()
         self.context_menu = None
 
@@ -719,6 +970,7 @@ class ZhujianBall(QWidget):
 # ─────────────────────────────
 class ZhujianMenu(QFrame):
     refresh_ready = pyqtSignal(object)
+    target_ready = pyqtSignal(object)
 
     def __init__(self, ball):
         super().__init__(None)
@@ -736,6 +988,8 @@ class ZhujianMenu(QFrame):
         # 面板边向：默认左；读持久化的 panel_side（贴边换边时写入）
         self.side = str(self.ball.state.get("panel_side") or "left")
         self._refreshing = False
+        self._target_seq = 0
+        self._refresh_seq = 0
         # 面板拖拽状态：面板与花朵始终作为一组移动
         self._drag_press = None
         self._drag_panel_start = None
@@ -744,6 +998,7 @@ class ZhujianMenu(QFrame):
         self._needs_reanchor = False  # 本次打开后内容尚未以完整高度锚定过
         self._user_dragged = False    # 本次打开后用户是否手动拖过面板（拖过则尊重手动位置）
         self.refresh_ready.connect(self._apply_async_refresh)
+        self.target_ready.connect(self._apply_target_state)
         self._build_ui()
 
     def _build_ui(self):
@@ -755,12 +1010,26 @@ class ZhujianMenu(QFrame):
         head_row.setSpacing(8)
         self.lbl_head = QLabel("解语花")
         self.lbl_head.setObjectName("head")
-        self.lbl_target = QLabel("跟随当前对话 · 读取中")
-        self.lbl_target.setObjectName("target")
         head_row.addWidget(self.lbl_head)
         head_row.addStretch(1)
-        head_row.addWidget(self.lbl_target)
+
+        target_row = QHBoxLayout()
+        target_row.setSpacing(6)
+        self.lbl_target_label = QLabel("这里可以选择按哪段对话推荐回复 →")
+        self.lbl_target_label.setObjectName("targetLabel")
+        self.btn_target = QPushButton("自动判断 ▾")
+        self.btn_target.setObjectName("target")
+        self.btn_target.setToolTip("点这里选参考对话：自动跟着最近对话，或固定一段")
+        self.btn_target.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_target.clicked.connect(self._open_target_menu)
+        target_row.addWidget(self.lbl_target_label)
+        target_row.addWidget(self.btn_target)
+        head_row.addLayout(target_row)
         root.addLayout(head_row)
+
+        self.target_menu = TargetMenu(self)
+        self.target_menu.hide()
+        root.addWidget(self.target_menu)
 
         self.grid = QGridLayout()
         self.grid.setSpacing(8)
@@ -799,11 +1068,14 @@ class ZhujianMenu(QFrame):
             }}
             QLabel {{ color: {c['ink']}; background: transparent; }}
             QLabel#head {{ color: {c['accent_deep']}; font-size: 15px; font-weight: 700; }}
-            QLabel#target {{
+            QLabel#targetLabel {{ color: {c['sub']}; font-size: 10px; padding-bottom: 1px; }}
+            QPushButton#target {{
                 color: {c['sub']}; background: {c['surface_alt']};
                 border: 1px solid {c['border']}; border-radius: 9px;
-                font-size: 10px; padding: 3px 8px;
+                font-size: 11px; padding: 3px 8px;
             }}
+            QPushButton#target:hover {{ color: {c['accent_deep']}; border-color: {c['accent']}; }}
+            QPushButton#target:disabled {{ color: {c['sub']}; background: {c['surface_alt']}; border-color: {c['border']}; }}
             QLabel#hint {{ color: {c['sub']}; font-size: 11px; padding: 2px 0; }}
             QLabel#cacheTime {{ color: {c['sub']}; font-size: 10px; }}
             QPushButton#refreshBtn {{
@@ -822,12 +1094,15 @@ class ZhujianMenu(QFrame):
             }}
             QLabel#rec:hover {{ background: {c['surface_alt']}; border-color: {c['accent']}; }}
         """)
+        if self.target_menu is not None:
+            self.target_menu.apply_theme()
 
     def prepare_for_show(self):
         self._needs_reanchor = True
         self._user_dragged = False
         self._flash("")
         self._update_target()
+        self._sync_target_state()
         cached = self.ball.cached
         if cached and cached.get("items"):
             self._render_items(cached["items"])
@@ -841,6 +1116,7 @@ class ZhujianMenu(QFrame):
                 data = api_get("/cache", timeout=4)
                 if data.get("ok") and data.get("cached") and data["cached"].get("items"):
                     self.refresh_ready.emit({
+                        "source": "cache",
                         "items": data["cached"]["items"],
                         "rid": data["cached"].get("rid") or "",
                         "ts": data["cached"].get("ts") or 0,
@@ -856,14 +1132,19 @@ class ZhujianMenu(QFrame):
         if self._refreshing:
             return
         self._refreshing = True
+        self._refresh_seq += 1
+        refresh_seq = self._refresh_seq
         self._set_refreshing_ui(True)
 
         def worker():
-            payload = {"items": None, "rid": None, "target": None, "error": None}
+            payload = {"source": "refresh", "seq": refresh_seq, "items": None, "rid": None, "target": None, "error": None, "target_state_loaded": False}
             try:
                 data = api_get("/target", timeout=4)
-                if data.get("ok") and data.get("target"):
+                if data.get("ok"):
                     payload["target"] = data["target"]
+                    payload["mode"] = data.get("mode") or "auto"
+                    payload["pinned"] = data.get("pinned")
+                    payload["target_state_loaded"] = True
             except Exception:
                 pass
             try:
@@ -871,7 +1152,8 @@ class ZhujianMenu(QFrame):
                 if data.get("ok"):
                     payload["items"] = data.get("items") or []
                     payload["rid"] = data.get("rid") or ""
-                    # 兜底：/target 超时但 /suggest 成功时，从生成响应补 target
+                    # 兜底：/target 超时但 /suggest 成功时，只补显示名；
+                    # 不覆盖本地 mode/pinned，避免把未知状态误写成自动模式。
                     if data.get("target") and not payload["target"]:
                         payload["target"] = data["target"]
             except Exception as e:
@@ -884,10 +1166,17 @@ class ZhujianMenu(QFrame):
         threading.Thread(target=worker, daemon=True, name="zhujian-refresh").start()
 
     def _apply_async_refresh(self, payload):
-        self._refreshing = False
-        self._set_refreshing_ui(False)
+        if payload.get("source") == "refresh" and payload.get("seq") != self._refresh_seq:
+            return
+        if payload.get("source") == "refresh":
+            self._refreshing = False
+            self._set_refreshing_ui(False)
         if payload.get("target"):
             self.ball.target_name = payload["target"].get("name") or payload["target"].get("agentId") or ""
+            self.ball.target_title = payload["target"].get("title") or self.ball.target_title
+        if payload.get("target_state_loaded"):
+            self.ball.target_mode = "pinned" if payload.get("mode") == "pinned" else "auto"
+            self.ball.pinned_target = payload.get("pinned")
         self._update_target()
         if payload.get("items"):
             ts = payload.get("ts") or (int(time.time() * 1000) if not payload.get("fromCache") else (self.ball.cached or {}).get("ts") or 0)
@@ -907,7 +1196,7 @@ class ZhujianMenu(QFrame):
 
     def _render_loading(self):
         self._clear_buttons()
-        lbl = QLabel("正在取推荐…")
+        lbl = QLabel("正在获取推荐回复…")
         lbl.setObjectName("hint")
         lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.grid.addWidget(lbl, 0, 0)
@@ -916,7 +1205,8 @@ class ZhujianMenu(QFrame):
 
     def _set_refreshing_ui(self, refreshing):
         self.btn_refresh.setEnabled(not refreshing)
-        self.btn_refresh.setText("正在取推荐…" if refreshing else "刷新推荐")
+        self.btn_target.setEnabled(not refreshing)
+        self.btn_refresh.setText("正在获取推荐回复…" if refreshing else "刷新推荐")
 
     def _update_cache_time(self):
         ts = (self.ball.cached or {}).get("ts") or 0
@@ -1002,8 +1292,67 @@ class ZhujianMenu(QFrame):
             pass
 
     def _update_target(self):
-        name = self.ball.target_name
-        self.lbl_target.setText(f"跟随当前对话 · {name}" if name else "跟随当前对话 · 读取中")
+        arrow = "▴" if self.target_menu is not None and self.target_menu.isVisible() else "▾"
+        if self.ball.target_mode == "pinned" and self.ball.pinned_target:
+            title = (self.ball.pinned_target.get("title") or self.ball.target_title or "").strip()
+            label = f"固定 · {title[:6]}" if title else "固定"
+        else:
+            label = "自动判断"
+        self.btn_target.setText(f"{label} {arrow}")
+
+    def _sync_target_state(self):
+        self._target_seq += 1
+        target_seq = self._target_seq
+
+        def worker():
+            payload = None
+            try:
+                data = api_get("/target", timeout=4)
+                if data.get("ok"):
+                    payload = {**data, "seq": target_seq}
+            except Exception:
+                pass
+            if payload is not None:
+                try:
+                    self.target_ready.emit(payload)
+                except RuntimeError:
+                    pass
+
+        threading.Thread(target=worker, daemon=True, name="zhujian-target").start()
+
+    def _apply_target_state(self, data):
+        if data.get("seq") != self._target_seq:
+            return
+        t = data.get("target") or {}
+        self.ball.target_name = t.get("name") or t.get("agentId") or ""
+        self.ball.target_title = t.get("title") or ""
+        self.ball.target_mode = "pinned" if data.get("mode") == "pinned" else "auto"
+        self.ball.pinned_target = data.get("pinned")
+        self._update_target()
+
+    def invalidate_target_sync(self):
+        """用户主动切换目标时作废先前的 /target 回包，避免旧状态覆盖新选择。"""
+        self._target_seq += 1
+
+    def _open_target_menu(self):
+        show = not self.target_menu.isVisible()
+        self._set_target_selector_visible(show)
+        if show:
+            self.target_menu.view_mode = "pinned" if self.ball.target_mode == "pinned" else "auto"
+            self.target_menu.refresh_sessions_async()
+
+    def _set_target_selector_visible(self, visible):
+        self.target_menu.setVisible(bool(visible))
+        self._update_target()
+        self._resize_after_target_change()
+
+    def _resize_after_target_change(self):
+        # 展开区和列表都是面板自身内容；等两轮布局稳定后按花朵重新锚定。
+        def settle():
+            self._sync_size()
+            if self.isVisible():
+                self.move_to_ball()
+        QTimer.singleShot(0, lambda: QTimer.singleShot(0, settle))
 
     def _update_hint(self):
         action = self.ball.action
@@ -1095,6 +1444,8 @@ class ZhujianMenu(QFrame):
         self.move(x, y)
 
     def close_menu(self):
+        if self.target_menu is not None:
+            self.target_menu.hide()
         self.hide()
 
     def showEvent(self, event):

@@ -1,8 +1,10 @@
 import importlib.util
+import os
 import pathlib
 import unittest
 
 
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 MODULE_PATH = pathlib.Path(__file__).parents[1] / "python" / "zhujian_app.py"
 SPEC = importlib.util.spec_from_file_location("zhujian_app", MODULE_PATH)
 zhujian = importlib.util.module_from_spec(SPEC)
@@ -88,6 +90,51 @@ class ZhujianMotionTests(unittest.TestCase):
             (0, 0, 800, 600),
         )
         self.assertEqual((dx, dy), (-100, -100))
+
+    def test_target_selector_is_embedded_compact_and_limited_to_five(self):
+        app = zhujian.QApplication.instance() or zhujian.QApplication([])
+
+        class Ball:
+            theme_mode = "light"
+            target_mode = "auto"
+            pinned_target = None
+
+        class Panel(zhujian.QFrame):
+            def __init__(self):
+                super().__init__()
+                self.ball = Ball()
+
+            def _update_target(self):
+                pass
+
+            def _resize_after_target_change(self):
+                pass
+
+        panel = Panel()
+        selector = zhujian.TargetMenu(panel)
+        selector._request_seq = 1
+        selector._apply_sessions({
+            "seq": 1,
+            "mode": "pinned",
+            "pinned": None,
+            "sessions": [
+                {"sessionPath": f"C:/sessions/{i}.jsonl", "title": f"窗口 {i}", "agentId": "hanako"}
+                for i in range(7)
+            ],
+            "error": "",
+        })
+        session_buttons = selector.findChildren(zhujian.QPushButton, "sessionItem")
+        self.assertIs(selector.parent(), panel)
+        self.assertFalse(selector.isWindow())
+        self.assertFalse(any(
+            child.metaObject().className() == "QScrollArea"
+            for child in selector.findChildren(zhujian.QWidget)
+        ))
+        self.assertEqual(len(selector.sessions), zhujian.TARGET_SESSION_LIMIT)
+        self.assertEqual(len(session_buttons), 5)
+        selector.deleteLater()
+        panel.deleteLater()
+        app.processEvents()
 
     def test_hover_uses_a_larger_exit_zone_and_short_grace_period(self):
         # 这个点在进入区外、退出区内：未悬停时不进入，已悬停时继续保持。

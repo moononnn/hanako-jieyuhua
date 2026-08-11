@@ -71,9 +71,9 @@ export async function execute(input, ctx) {
   const cfg = getConfig(dataDir);
 
   // 展示模式防线（2026-08-10）：observer 只拦「引导层」，模型仍可能自发调用本工具。
-  // 非卡片模式（竹简/关闭）下绝不返回卡片数据，从根上保证回复里不会出现推荐卡片。
+  // 非卡片模式（悬浮球/关闭）下绝不返回卡片数据，从根上保证回复里不会出现推荐卡片。
   if (cfg.presentation !== "card") {
-    const label = cfg.presentation === "ball" ? "竹简" : "关闭";
+    const label = cfg.presentation === "ball" ? "悬浮球" : "关闭";
     return {
       content: [{ type: "text", text: `（解语花当前是${label}模式，不生成推荐卡片）` }]
     };

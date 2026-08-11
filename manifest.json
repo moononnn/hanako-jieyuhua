@@ -2,7 +2,7 @@
   "manifestVersion": 1,
   "id": "jiegehua",
   "name": "解语花",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "AI 回复完之后，帮你生成几条推荐回复，点一下就能接上话。可选回复卡片或桌面解语花悬浮球（一朵会接话的樱花）。",
   "minAppVersion": "0.159.0",
   "trust": "full-access",

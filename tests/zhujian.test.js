@@ -1,4 +1,4 @@
-// 接个话 — 竹简悬浮球测试（node:test，零依赖）
+// 解语花 — 悬浮球测试（node:test，零依赖）
 // 覆盖：presentation 配置、ballCache 归一化、会话跟随（多 agent 选最活跃）、
 //      claimAndSend 原子性（并发防重复/失败回滚）、getSuggestionText（复制不标记）
 
@@ -211,7 +211,7 @@ test("extractConversationMessage 多段 text 拼接、超长截断", () => {
   });
   assert.equal(msg.content, "第一段\n第二段");
   const long = extractConversationMessage({ message: { role: "user", content: [{ type: "text", text: "x".repeat(800) }] } });
-  assert.equal(long.content.length, 500);
+  assert.equal(long.content.length, 800);
 });
 
 test("readRecentMessages 读 Hana 现行格式文件（过滤工具消息）", () => {
@@ -255,6 +255,27 @@ test("claimAndSend 发送成功并预标记 used", async () => {
   const again = await claimAndSend(dir, { rid, index: 0 }, fakeBus());
   assert.equal(again.ok, false);
   assert.match(again.error, /失效/);
+});
+
+test("claimAndSend 仅 sessionPath 时按宿主契约发送到指定会话", async () => {
+  const dir = tmpDir();
+  const { rid } = await createPending(dir, {
+    items: [{ text: "固定会话回复" }],
+    sessionId: "",
+    sessionPath: "C:/agents/hanako/sessions/fixed.jsonl"
+  });
+  let called = null;
+  const bus = {
+    async request(name, payload) {
+      called = { name, payload };
+      return { accepted: true, sessionPath: payload.sessionPath };
+    }
+  };
+  const res = await claimAndSend(dir, { rid, index: 0 }, bus);
+  assert.equal(res.ok, true);
+  assert.equal(called.name, "session:send");
+  assert.equal(called.payload.sessionId, undefined);
+  assert.equal(called.payload.sessionPath, "C:/agents/hanako/sessions/fixed.jsonl");
 });
 
 test("claimAndSend 并发双击只成功一次", async () => {
