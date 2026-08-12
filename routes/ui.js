@@ -423,12 +423,12 @@ ${hanaCss ? `<link rel="stylesheet" href="${escapeAttr(hanaCss)}">` : ""}
     <button class="dgh-top-btn" id="dgh-update" type="button" title="检查 GitHub 上的新版本">检查更新</button>
     <button class="dgh-top-btn" id="dgh-feedback" type="button" title="遇到 bug 或有建议，来 GitHub 提 issue">反馈</button>
   </div>
-  <div class="dgh-sub">AI 回复完之后，帮你想几句接得上的话</div>
+  <div class="dgh-sub">小花回复完之后，帮你想几句接得上的话</div>
 
   ${cfg.guideDismissed ? "" : `
   <div class="dgh-guide" id="dgh-guide">
     <div class="dgh-guide-title">第一次用解语花？</div>
-    <div class="dgh-guide-body">聊天时 AI 回复下方会出现一张小卡片，上面是几条你可能想说的话，点一下复制（或直接发送），不用自己打字。默认已经开了，直接去聊就行。<br>生成推荐需要一个模型，默认已跟随当前聊天框的助手模型，不用额外配置。想换模型或单独配一个更省钱的，点右上角「模型设置」。</div>
+    <div class="dgh-guide-body">聊天时小花回复下方会出现一张小卡片，上面是几条你可能想说的话，点一下复制（或直接发送），不用自己打字。默认已经开了，直接去聊就行。<br>生成推荐需要一个模型，默认已跟随当前聊天框的小花模型，不用额外配置。想换模型或单独配一个更省钱的，点右上角「模型设置」。</div>
     <div class="dgh-row">
       <button class="dgh-btn ghost" id="dgh-guide-close" type="button">知道了</button>
     </div>
@@ -436,7 +436,7 @@ ${hanaCss ? `<link rel="stylesheet" href="${escapeAttr(hanaCss)}">` : ""}
 
   <div class="dgh-card">
     <div class="dgh-card-title">展示方式</div>
-    ${radio("presentation", "card", cfg.presentation !== "ball" && cfg.presentation !== "off", "回复卡片", "AI 回复后，推荐卡片出现在回复下方（原来的方式）")}
+    ${radio("presentation", "card", cfg.presentation !== "ball" && cfg.presentation !== "off", "回复卡片", "小花回复后，推荐卡片出现在回复下方（原来的方式）")}
     ${radio("presentation", "ball", cfg.presentation === "ball", "解语花", "桌面一朵会接话的樱花，点开面板直接挑话发出去，不占对话流")}
     ${radio("presentation", "off", cfg.presentation === "off", "关闭", "不生成任何推荐")}
     <div class="dgh-ball-box dgh-hidden" id="dgh-ball-box">

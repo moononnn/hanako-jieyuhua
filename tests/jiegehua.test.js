@@ -154,6 +154,53 @@ test("parseSuggestions 去掉代码块围栏", () => {
   ]);
 });
 
+test("parseSuggestions 解析每行一个对象的 JSONL，不把英文键名显示给用户", () => {
+  const raw = [
+    '{"text":"哈哈，原来是这样！","direction":"追问/延伸"}',
+    '{"text":"我还以为能给你发红包呢","direction":"分享/感慨"}',
+    '{"text":"那你能给我发红包吗？","direction":"行动/请求"}'
+  ].join("\n");
+  assert.deepEqual(parseSuggestions(raw, 3), [
+    { text: "哈哈，原来是这样！", direction: "追问/延伸" },
+    { text: "我还以为能给你发红包呢", direction: "分享/感慨" },
+    { text: "那你能给我发红包吗？", direction: "行动/请求" }
+  ]);
+});
+
+test("parseSuggestions 解析常见 suggestions 包裹对象", () => {
+  const raw = JSON.stringify({ suggestions: [
+    { text: "继续讲讲嘛", direction: "追问/延伸" },
+    { text: "那你帮我看看", direction: "行动/请求" }
+  ] });
+  assert.deepEqual(parseSuggestions(raw, 2), [
+    { text: "继续讲讲嘛", direction: "追问/延伸" },
+    { text: "那你帮我看看", direction: "行动/请求" }
+  ]);
+});
+
+test("parseSuggestions 从带尾逗号的多行数组中提取对象并过滤括号", () => {
+  const raw = '[\n{"text":"第一条","direction":"追问"},\n{"text":"第二条","direction":"分享"},\n]';
+  assert.deepEqual(parseSuggestions(raw, 2), [
+    { text: "第一条", direction: "追问" },
+    { text: "第二条", direction: "分享" }
+  ]);
+});
+
+test("parseSuggestions 识别 JSONL 后丢弃模型前缀说明", () => {
+  const raw = '好的，以下是推荐：\n{"text":"继续讲讲嘛","direction":"追问"}\n{"text":"那你帮我看看","direction":"行动"}';
+  assert.deepEqual(parseSuggestions(raw, 2), [
+    { text: "继续讲讲嘛", direction: "追问" },
+    { text: "那你帮我看看", direction: "行动" }
+  ]);
+});
+
+test("parseSuggestions 保留纯数字及数字开头的普通推荐", () => {
+  assert.deepEqual(parseSuggestions("1. 520\n2. 2026年也要加油", 2), [
+    { text: "520", direction: "" },
+    { text: "2026年也要加油", direction: "" }
+  ]);
+});
+
 test("parseSuggestions 回退编号列表", () => {
   const items = parseSuggestions("1. 第一个\n2. 第二个\n3. 第三个", 3);
   assert.deepEqual(items, [
