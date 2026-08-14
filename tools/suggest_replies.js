@@ -58,6 +58,36 @@ export function buildStyleLines(count, styles, selected) {
   return lines;
 }
 
+// ─── 推荐 prompt 公共构建（卡片工具与悬浮球共用，2026-08-14 抽出） ───
+// 参数：count=条数，styles=方向配置，selected=按条数勾选索引，contextText=对话上下文，hint=额外要求（可选）
+// 新条款：① 模仿用户说话风格（含风险闸：不为了模仿而把话说没）② 语言跟随对话
+// 注意：编号顺序与 buildStyleLines 自带的「4.」保持衔接，改这里时留意
+export function buildSuggestionPrompt({ count, styles, selected, contextText, hint }) {
+  const sel = (selected && selected[count]) || undefined;
+  const styleLines = buildStyleLines(count, styles, sel);
+  const hintLine = hint ? `\n额外要求：${hint}` : "";
+  return [
+    "【红线】所有输出必须是「用户」在对话中对「助手」说的话。第一人称「我」、直接对助手喊，不要生成助手口吻、引导问句、旁观者描述这种不是用户在说的话。",
+    "你是「解语花」推荐引擎，你是用户的「嘴替」。",
+    "下面对话中，「用户」是发消息的人，「助手」是回复的人。",
+    `你的任务：生成 ${count} 条「用户接下来准备发给助手的话」。`,
+    "硬性要求：",
+    "1. 紧扣下面对话的具体内容——顺着刚才聊的话题、细节、情绪往下走，不要生成与对话无关的泛泛之谈",
+    "2. 必须是用户的口吻、第一人称（「我」），直接对助手说话",
+    "3. 每条 5~20 个字，口语化",
+    ...styleLines,
+    "5. 模仿用户说话的方式：语气词、口头禅、用词风格、标点习惯都要像同一个人说出来的；但句子长短和内容饱满度优先保证推荐价值，不要为了模仿而把话说没",
+    "6. 推荐语的语言跟随对话的主要语言：对话是中文就用中文，是英文就用英文，别混",
+    "7. 反面例子（不要生成）：「早啊，今天想干点啥」「今天天气不错」——这是助手口吻或与对话无关",
+    "8. 正面例子（紧扣对话）：「你刚说的那个方案，具体怎么操作？」「听你这么说我也想起一件事…」「那你帮我看看这个呗」",
+    "9. 只输出一个合法 JSON 数组，首字符必须是 [，末字符必须是 ]；不要逐行输出独立对象，不要任何其他文字、不要解释。数组元素是对象：{\"text\": \"推荐的话\", \"direction\": \"第N条对应的方向名，照抄上方给出的方向，如'撒娇'\"}",
+    "对话：",
+    contextText || "（无可用对话，生成通用的用户对助手说的话）",
+    hintLine,
+    "输出：",
+  ].join("\n");
+}
+
 // 按条数估算推荐卡片初始高度（2026-08-06 破案）：宿主 card 槽位初始高度 = 400/aspectRatio（无则固定 300px），
 // 且 card 槽位的 ui.resize 上报实测不生效（之前误信朋友圈 page 槽位协议，朋友圈没做过这种卡片）。
 // 正解：工具返回时按条数带上 aspectRatio，宿主初始高度直接精确匹配内容。
@@ -104,30 +134,13 @@ export async function execute(input, ctx) {
       contextText = `（对话内容不可用）用户希望推荐方向：${cleanHint}`;
     }
 
-    const hintLine = cleanHint ? `\n额外要求：${cleanHint}` : "";
-
-    // 按条数分配方向（配置 styles + 该档勾选 selectedByCount）
-    const sel = (cfg.selectedByCount && cfg.selectedByCount[cfg.count]) || undefined;
-    const styleLines = buildStyleLines(cfg.count, cfg.styles, sel);
-
-    const prompt = [
-      "【红线】所有输出必须是「用户」在对话中对「助手」说的话。第一人称「我」、直接对助手喊，不要生成助手口吻、引导问句、旁观者描述这种不是用户在说的话。",
-      "你是「解语花」推荐引擎，你是用户的「嘴替」。",
-      "下面对话中，「用户」是发消息的人，「助手」是回复的人。",
-      `你的任务：生成 ${cfg.count} 条「用户接下来准备发给助手的话」。`,
-      "硬性要求：",
-      "1. 紧扣下面对话的具体内容——顺着刚才聊的话题、细节、情绪往下走，不要生成与对话无关的泛泛之谈",
-      "2. 必须是用户的口吻、第一人称（「我」），直接对助手说话",
-      "3. 每条 5~20 个字，口语化",
-      ...styleLines,
-      "5. 反面例子（不要生成）：「早啊，今天想干点啥」「今天天气不错」——这是助手口吻或与对话无关",
-      "6. 正面例子（紧扣对话）：「你刚说的那个方案，具体怎么操作？」「听你这么说我也想起一件事…」「那你帮我看看这个呗」",
-      "7. 只输出一个合法 JSON 数组，首字符必须是 [，末字符必须是 ]；不要逐行输出独立对象，不要任何其他文字、不要解释。数组元素是对象：{\"text\": \"推荐的话\", \"direction\": \"第N条对应的方向名，照抄上方给出的方向，如'撒娇'\"}",
-      "对话：",
-      contextText || "（无可用对话，生成通用的用户对助手说的话）",
-      hintLine,
-      "输出："
-    ].join("\n");
+    const prompt = buildSuggestionPrompt({
+      count: cfg.count,
+      styles: cfg.styles,
+      selected: cfg.selectedByCount,
+      contextText,
+      hint: cleanHint,
+    });
 
     // ── 3. 生成 ──
     // agent 档走 ctx.model.sample（跟随助手当前模型）；hana/custom 档走 HTTP

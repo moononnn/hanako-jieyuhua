@@ -538,9 +538,11 @@ class TargetMenu(QFrame):
         self.view_mode = "auto"
         self.ball.target_mode = "auto"
         self.ball.pinned_target = None
+        self.ball.target_name = ""
         self.ball.target_title = ""
         self.panel._update_target()
         self.panel._flash("已改为自动判断活跃窗口 ✓")
+        self.panel._sync_target_state()
         self.panel._set_target_selector_visible(False)
 
     def _pick(self, s):
@@ -953,6 +955,9 @@ class ZhujianBall(QWidget):
             api_post("/action", {"action": action}, timeout=5)
         except Exception:
             pass
+        # 模式切换后同步面板底部的模式文案
+        if self.menu is not None:
+            self.menu._update_hint()
 
     # ── 面板 ──
     def _open_menu(self):
@@ -971,6 +976,8 @@ class ZhujianBall(QWidget):
 class ZhujianMenu(QFrame):
     refresh_ready = pyqtSignal(object)
     target_ready = pyqtSignal(object)
+    rename_ready = pyqtSignal(object)
+    undo_ready = pyqtSignal(object)
 
     def __init__(self, ball):
         super().__init__(None)
@@ -988,6 +995,7 @@ class ZhujianMenu(QFrame):
         # 面板边向：默认左；读持久化的 panel_side（贴边换边时写入）
         self.side = str(self.ball.state.get("panel_side") or "left")
         self._refreshing = False
+        self._renaming = False
         self._target_seq = 0
         self._refresh_seq = 0
         # 面板拖拽状态：面板与花朵始终作为一组移动
@@ -999,6 +1007,8 @@ class ZhujianMenu(QFrame):
         self._user_dragged = False    # 本次打开后用户是否手动拖过面板（拖过则尊重手动位置）
         self.refresh_ready.connect(self._apply_async_refresh)
         self.target_ready.connect(self._apply_target_state)
+        self.rename_ready.connect(self._apply_rename_result)
+        self.undo_ready.connect(self._apply_undo_result)
         self._build_ui()
 
     def _build_ui(self):
@@ -1027,6 +1037,11 @@ class ZhujianMenu(QFrame):
         head_row.addLayout(target_row)
         root.addLayout(head_row)
 
+        # 当前读取的是哪个对话框（自动判断结果或手动固定的会话），重命名/推荐都基于它
+        self.lbl_target_info = QLabel("")
+        self.lbl_target_info.setObjectName("targetInfo")
+        root.addWidget(self.lbl_target_info)
+
         self.target_menu = TargetMenu(self)
         self.target_menu.hide()
         root.addWidget(self.target_menu)
@@ -1053,6 +1068,32 @@ class ZhujianMenu(QFrame):
         row_refresh.addStretch(1)
         root.addLayout(row_refresh)
 
+        self.lbl_section = QLabel("会话标题")
+        self.lbl_section.setObjectName("sectionTitle")
+        root.addWidget(self.lbl_section)
+
+        row_rename = QHBoxLayout()
+        row_rename.setSpacing(8)
+        self.btn_rename = QPushButton("重命名标题")
+        self.btn_rename.setObjectName("renameBtn")
+        self.btn_rename.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_rename.setToolTip("总结这段对话的整体内容，给会话起个新标题")
+        self.btn_rename.clicked.connect(self.rename_async)
+        row_rename.addWidget(self.btn_rename)
+        self.btn_undo = QPushButton("退回")
+        self.btn_undo.setObjectName("undoBtn")
+        self.btn_undo.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_undo.setToolTip("退回到上一次的标题")
+        self.btn_undo.setEnabled(False)
+        self.btn_undo.clicked.connect(self.undo_async)
+        row_rename.addWidget(self.btn_undo)
+        row_rename.addStretch(1)
+        # 提示语长度受行宽限制：按钮 88+48+间距后约剩 150px，14 字会截断，用 10 字版本完整显示
+        self.lbl_rename_hint = QLabel("← 这里可以退回旧标题")
+        self.lbl_rename_hint.setObjectName("renameHint")
+        row_rename.addWidget(self.lbl_rename_hint)
+        root.addLayout(row_rename)
+
         self.lbl_hint = QLabel("")
         self.lbl_hint.setObjectName("hint")
         self.lbl_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1069,6 +1110,7 @@ class ZhujianMenu(QFrame):
             QLabel {{ color: {c['ink']}; background: transparent; }}
             QLabel#head {{ color: {c['accent_deep']}; font-size: 15px; font-weight: 700; }}
             QLabel#targetLabel {{ color: {c['sub']}; font-size: 10px; padding-bottom: 1px; }}
+            QLabel#targetInfo {{ color: {c['sub']}; font-size: 10px; }}
             QPushButton#target {{
                 color: {c['sub']}; background: {c['surface_alt']};
                 border: 1px solid {c['border']}; border-radius: 9px;
@@ -1077,14 +1119,25 @@ class ZhujianMenu(QFrame):
             QPushButton#target:hover {{ color: {c['accent_deep']}; border-color: {c['accent']}; }}
             QPushButton#target:disabled {{ color: {c['sub']}; background: {c['surface_alt']}; border-color: {c['border']}; }}
             QLabel#hint {{ color: {c['sub']}; font-size: 11px; padding: 2px 0; }}
+            QLabel#sectionTitle {{ color: {c['accent_deep']}; font-size: 12px; font-weight: 700; }}
+            QLabel#renameHint {{ color: {c['sub']}; font-size: 10px; }}
             QLabel#cacheTime {{ color: {c['sub']}; font-size: 10px; }}
-            QPushButton#refreshBtn {{
+            QPushButton#refreshBtn, QPushButton#renameBtn {{
+                min-height: 28px; min-width: 88px; color: {c['accent_text']}; background: {c['accent']};
+                border: 1px solid {c['accent']}; border-radius: 10px;
+                font-size: 11px; font-weight: 600; padding: 0 13px;
+            }}
+            QPushButton#refreshBtn:hover, QPushButton#renameBtn:hover {{ background: {c['accent_deep']}; border-color: {c['accent_deep']}; }}
+            QPushButton#refreshBtn:disabled, QPushButton#renameBtn:disabled {{
+                color: {c['sub']}; background: {c['surface_alt']}; border-color: {c['border']};
+            }}
+            QPushButton#undoBtn {{
                 min-height: 28px; color: {c['accent_text']}; background: {c['accent']};
                 border: 1px solid {c['accent']}; border-radius: 10px;
                 font-size: 11px; font-weight: 600; padding: 0 13px;
             }}
-            QPushButton#refreshBtn:hover {{ background: {c['accent_deep']}; border-color: {c['accent_deep']}; }}
-            QPushButton#refreshBtn:disabled {{
+            QPushButton#undoBtn:hover {{ background: {c['accent_deep']}; border-color: {c['accent_deep']}; }}
+            QPushButton#undoBtn:disabled {{
                 color: {c['sub']}; background: {c['surface_alt']}; border-color: {c['border']};
             }}
             QLabel#feedback {{ color: {c['pink']}; font-size: 11px; font-weight: 600; }}
@@ -1208,6 +1261,93 @@ class ZhujianMenu(QFrame):
         self.btn_target.setEnabled(not refreshing)
         self.btn_refresh.setText("正在获取推荐回复…" if refreshing else "刷新推荐")
 
+    def rename_async(self):
+        """重命名标题：总结整段对话 → 改宿主标题，服务端会记下旧标题供退回。"""
+        if self._renaming:
+            return
+        self._renaming = True
+        self._set_renaming_ui(True)
+
+        def worker():
+            payload = {"ok": False, "error": None, "title": None, "agentName": "", "fallback": False}
+            try:
+                data = api_post("/rename", {}, timeout=40)
+                payload["ok"] = bool(data.get("ok"))
+                payload["title"] = data.get("title") or ""
+                payload["agentName"] = data.get("agentName") or ""
+                payload["fallback"] = bool(data.get("fallback"))
+                payload["error"] = data.get("error")
+            except urllib.error.HTTPError as e:
+                try:
+                    body = json.loads(e.read().decode("utf-8"))
+                    payload["error"] = body.get("error") or f"出错了 ({e.code})"
+                except Exception:
+                    payload["error"] = f"出错了 ({e.code})"
+            except Exception:
+                payload["error"] = "连不上解语花，看看插件开着没"
+            try:
+                self.rename_ready.emit(payload)
+            except RuntimeError:
+                pass
+
+        threading.Thread(target=worker, daemon=True, name="zhujian-rename").start()
+
+    def undo_async(self):
+        """退回：把标题恢复到最近一次重命名之前。"""
+        if self._renaming:
+            return
+
+        def worker():
+            payload = {"ok": False, "error": None, "restoredTitle": None, "agentName": ""}
+            try:
+                data = api_post("/rename/undo", {}, timeout=15)
+                payload["ok"] = bool(data.get("ok"))
+                payload["restoredTitle"] = data.get("restoredTitle") or ""
+                payload["agentName"] = data.get("agentName") or ""
+                payload["error"] = data.get("error")
+            except urllib.error.HTTPError as e:
+                try:
+                    body = json.loads(e.read().decode("utf-8"))
+                    payload["error"] = body.get("error") or f"出错了 ({e.code})"
+                except Exception:
+                    payload["error"] = f"出错了 ({e.code})"
+            except Exception:
+                payload["error"] = "连不上解语花，看看插件开着没"
+            try:
+                self.undo_ready.emit(payload)
+            except RuntimeError:
+                pass
+
+        threading.Thread(target=worker, daemon=True, name="zhujian-undo").start()
+
+    def _apply_rename_result(self, payload):
+        self._renaming = False
+        self._set_renaming_ui(False)
+        if payload.get("ok") and payload.get("title"):
+            # 第一行显示新标题，第二行提示宿主侧栏的刷新规律（回合结束才重拉列表）
+            tip = "（兜底标题）" if payload.get("fallback") else ""
+            self._flash(f"已改为：{payload['title']}\n{tip}聊一句后自动刷新")
+            self.btn_undo.setEnabled(True)
+            self._sync_target_state()
+        else:
+            self._flash(payload.get("error") or "重命名失败，再试一次")
+
+    def _apply_undo_result(self, payload):
+        if payload.get("ok"):
+            restored = payload.get("restoredTitle") or "无标题"
+            who = f"{payload['agentName']} 的" if payload.get("agentName") else ""
+            self._flash(f"已把{who}会话标题退回：{restored}")
+            self.btn_undo.setEnabled(False)
+            self._sync_target_state()
+        else:
+            self._flash(payload.get("error") or "退回失败，再试一次")
+
+    def _set_renaming_ui(self, renaming):
+        self.btn_rename.setEnabled(not renaming)
+        self.btn_rename.setText("总结中…" if renaming else "重命名标题")
+        if renaming:
+            self.btn_undo.setEnabled(False)
+
     def _update_cache_time(self):
         ts = (self.ball.cached or {}).get("ts") or 0
         if ts:
@@ -1294,11 +1434,30 @@ class ZhujianMenu(QFrame):
     def _update_target(self):
         arrow = "▴" if self.target_menu is not None and self.target_menu.isVisible() else "▾"
         if self.ball.target_mode == "pinned" and self.ball.pinned_target:
-            title = (self.ball.pinned_target.get("title") or self.ball.target_title or "").strip()
+            # target_title 是最近一次 /target 拉的值（重命名后会更新），比固定时存的 pinned_target.title 新
+            title = (self.ball.target_title or self.ball.pinned_target.get("title") or "").strip()
             label = f"固定 · {title[:6]}" if title else "固定"
         else:
             label = "自动判断"
         self.btn_target.setText(f"{label} {arrow}")
+        self._update_target_info()
+
+    def _update_target_info(self):
+        """头部下方显示当前读取的是哪个对话框：固定会话或自动判断结果。"""
+        name = (self.ball.target_name or "").strip()
+        if self.ball.target_mode == "pinned" and self.ball.pinned_target:
+            title = (self.ball.target_title or self.ball.pinned_target.get("title") or "").strip()
+            prefix = "固定"
+        else:
+            title = (self.ball.target_title or "").strip()
+            prefix = "自动"
+        if title:
+            text = " · ".join([prefix, name, title]) if name else " · ".join([prefix, title])
+        elif name:
+            text = " · ".join([prefix, name]) + "（无标题）"
+        else:
+            text = "自动 · 正在定位对话…"
+        self.lbl_target_info.setText(text)
 
     def _sync_target_state(self):
         self._target_seq += 1
@@ -1329,6 +1488,9 @@ class ZhujianMenu(QFrame):
         self.ball.target_mode = "pinned" if data.get("mode") == "pinned" else "auto"
         self.ball.pinned_target = data.get("pinned")
         self._update_target()
+        # 退回按钮可用性由服务端真实记录驱动（面板打开/重命名/退回都会刷新）
+        if "undoAvailable" in data and not self._renaming:
+            self.btn_undo.setEnabled(bool(data.get("undoAvailable")))
 
     def invalidate_target_sync(self):
         """用户主动切换目标时作废先前的 /target 回包，避免旧状态覆盖新选择。"""
@@ -1356,7 +1518,8 @@ class ZhujianMenu(QFrame):
 
     def _update_hint(self):
         action = self.ball.action
-        self.lbl_hint.setText("点一下直接发出" if action == "send" else "点一下复制，粘到输入框发出")
+        mode = "点一下直接发出" if action == "send" else "点一下复制，粘到输入框发出"
+        self.lbl_hint.setText(f"当前模式：{mode}")
         self._flash("")
 
     def _flash(self, text):
