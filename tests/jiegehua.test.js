@@ -224,6 +224,21 @@ test("parseSuggestions 空输入返回空数组", () => {
   assert.deepEqual(parseSuggestions(null, 3), []);
 });
 
+test("parseSuggestions 单行截断兜底：从残缺 JSON 挖出完整 text 字段", () => {
+  // 模型输出被切断（单行数组没写完），整体与逐行都解析失败
+  const raw = '[{"text": "那明天还要接着改吗？", "direction": "追问/延伸"}, {"text": "这么一搞我今天白干了"';
+  assert.deepEqual(parseSuggestions(raw, 3), [
+    { text: "那明天还要接着改吗？", direction: "" },
+    { text: "这么一搞我今天白干了", direction: "" }
+  ]);
+  // 截断到 count
+  assert.equal(parseSuggestions(raw, 1).length, 1);
+});
+
+test("parseSuggestions 极端截断（键名都没写完）放弃，不硬捞", () => {
+  assert.deepEqual(parseSuggestions('[{"text', 3), []);
+});
+
 // ═══ 风格方向数据迁移 ═══
 
 test("normalizeStyles 旧 string[] 迁移到 {name, intent} 对象数组", () => {

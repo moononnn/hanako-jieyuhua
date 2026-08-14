@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 解语花 · 樱花掠风：上扬主枝与下探花枝。主枝两端延伸到画布外，像树冠从桌面外探入。 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400" width="400" height="400">
+  <defs>
+    <linearGradient id="mainTwig" x1="0" y1="0" x2="1" y2="0.35">
+      <stop offset="0" stop-color="#624d48"/>
+      <stop offset="0.52" stop-color="#8a675d"/>
+      <stop offset="1" stop-color="#70544f"/>
+    </linearGradient>
+    <linearGradient id="youngTwig" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#806159"/>
+      <stop offset="1" stop-color="#9a7467"/>
+    </linearGradient>
+  </defs>
+
+  <!-- 粗主枝：近横向、向右上轻抬，左端与右端都延伸到画布外 -->
+  <path d="M-30 159 C58 141 129 119 207 95 C281 73 347 62 430 72"
+        fill="none" stroke="#3f3534" stroke-width="27" stroke-linecap="round" opacity="0.18"/>
+  <path d="M-30 153 C58 135 129 113 207 89 C281 67 347 56 430 66"
+        fill="none" stroke="url(#mainTwig)" stroke-width="20" stroke-linecap="round"/>
+  <path d="M-24 146 C62 128 132 108 207 85 C276 65 340 55 420 63"
+        fill="none" stroke="#b28a7b" stroke-width="4.5" stroke-linecap="round" opacity="0.48"/>
+
+  <!-- 细分枝：从主枝腹侧生出，向右下探到花心 -->
+  <path d="M174 101 C187 132 207 163 228 190 C242 208 250 221 256 235"
+        fill="none" stroke="#463938" stroke-width="14" stroke-linecap="round" opacity="0.18"/>
+  <path d="M174 96 C187 127 207 158 228 185 C242 203 250 217 256 231"
+        fill="none" stroke="url(#youngTwig)" stroke-width="9.5" stroke-linecap="round"/>
+  <path d="M178 99 C191 128 210 157 231 183"
+        fill="none" stroke="#c09687" stroke-width="2.2" stroke-linecap="round" opacity="0.52"/>
+
+  <!-- 花托只露一点尖，帮助花朵和细枝连成一体 -->
+  <path d="M251 223 C233 220 222 227 215 241 C232 243 246 239 260 229 Z"
+        fill="#86a77e" stroke="#59675a" stroke-width="3.5" stroke-linejoin="round"/>
+  <path d="M251 223 C260 211 272 208 284 214 C278 227 267 235 254 237 Z"
+        fill="#9ab68d" stroke="#59675a" stroke-width="3.5" stroke-linejoin="round"/>
+</svg>

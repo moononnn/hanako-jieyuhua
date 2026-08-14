@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 解语花 · 樱花掠风：跟随叶层。叶柄在画布中心，便于独立回弹。 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400" width="400" height="400">
+  <defs>
+    <linearGradient id="leaf" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#b8d4ad"/>
+      <stop offset="1" stop-color="#6f9e7a"/>
+    </linearGradient>
+  </defs>
+  <path d="M199 202 C171 164 121 144 76 158 C90 211 134 251 198 211 Z"
+        fill="#4f6657" opacity="0.16" transform="translate(3 5)"/>
+  <path d="M199 198 C171 160 121 140 76 154 C90 207 134 247 198 207 Z"
+        fill="url(#leaf)" stroke="#5c6d61" stroke-width="7" stroke-linejoin="round"/>
+  <path d="M188 201 C151 183 119 168 88 159"
+        fill="none" stroke="#e6f0df" stroke-width="5" stroke-linecap="round" opacity="0.72"/>
+  <path d="M198 202 C214 211 228 222 241 236"
+        fill="none" stroke="#7b655d" stroke-width="7" stroke-linecap="round"/>
+</svg>

@@ -19,6 +19,39 @@ export const parameters = {
   required: []
 };
 
+// ─── 口语质量准则（杀 AI 八股，2026-08-14 加） ───
+// 借鉴：闲不住小纸条的写前禁令（按类禁大词/句式/抒情词）+ 在干嘛弹幕质量准则 + 玥饼预设的错例→正例对照格式
+// 按"类"禁而不是逐句禁，保证通用性；错例→正例比纯禁令更有效
+const QUALITY_RULES = `【口语质量准则】推荐语是真人打字，不是写文章：
+1. 不打比方：不用「比…还…」「像…一样」「仿佛…」这类修辞，想说啥直接说。
+   ✗ 「你这效率比开了挂还离谱」 → ✓ 「你这效率也太夸张了」
+2. 不堆大词：「逻辑」「哲学」「诗意」「灵魂」「时光」这类词一个都不用。
+3. 不用八股句式：「不是…而是…」「与其说…不如说…」「有一种…在蔓延」「某种说不清的东西」都不用。
+4. 不空泛敷衍：「哈哈确实」「你说得对」「真不错」「原来如此」这种谁都能接的话，禁止。
+5. 不堆感叹词：「哇！！太棒了吧！！」这种为显热情硬堆的感叹号，禁止；语气词点到为止。
+6. 对自家助手不用客气：「谢谢你的建议」「麻烦你了」这种礼貌腔，禁止。
+7. 允许短句、大白话，一句话一个意思，不用每句都精彩。`;
+
+// ─── 八股检测（借鉴闲不住 hasAiFlavor，按类正则；宁漏杀不误杀，写前禁令已压源头） ───
+const AI_FLAVOR_PATTERNS = [
+  /比[^，。！？\s]{0,8}还/, // 比字句：你xx比xx还xx
+  /仿佛|宛如|犹如/, // 文绉绉的比喻词
+  /不是[^。！？]{0,10}而是/, // 八股句式（含带逗号形态：不是…，而是…）
+  /与其说/, // 八股句式
+  /某种|说不清/, // 模糊指代（某种说不清的东西）
+  /逻辑|哲学|诗意|灵魂|时光/, // 大词
+  /一丝|一抹|刹那/, // 模糊抒情词
+  /哈哈确实|你说得对|真不错|原来如此/, // 万能敷衍
+  /谢谢你的建议|麻烦你了/, // 对自家助手的礼貌腔
+  /！{3,}/, // 感叹号轰炸
+];
+
+// 命中任一八股模式返回 true（推荐条目级过滤用）
+export function hasAiFlavor(text) {
+  if (!text || typeof text !== "string") return false;
+  return AI_FLAVOR_PATTERNS.some((p) => p.test(text));
+}
+
 // 按条数生成方向分配行（方向来自配置 styles，勾选来自 selected）
 // styles 接受两种格式：旧 string[] 与新 {name, intent}[]，统一在内部映射为对象
 export function buildStyleLines(count, styles, selected) {
@@ -81,6 +114,7 @@ export function buildSuggestionPrompt({ count, styles, selected, contextText, hi
     "7. 反面例子（不要生成）：「早啊，今天想干点啥」「今天天气不错」——这是助手口吻或与对话无关",
     "8. 正面例子（紧扣对话）：「你刚说的那个方案，具体怎么操作？」「听你这么说我也想起一件事…」「那你帮我看看这个呗」",
     "9. 只输出一个合法 JSON 数组，首字符必须是 [，末字符必须是 ]；不要逐行输出独立对象，不要任何其他文字、不要解释。数组元素是对象：{\"text\": \"推荐的话\", \"direction\": \"第N条对应的方向名，照抄上方给出的方向，如'撒娇'\"}",
+    QUALITY_RULES,
     "对话：",
     contextText || "（无可用对话，生成通用的用户对助手说的话）",
     hintLine,
@@ -145,10 +179,17 @@ export async function execute(input, ctx) {
     // ── 3. 生成 ──
     // agent 档走 ctx.model.sample（跟随助手当前模型）；hana/custom 档走 HTTP
     const sampleFn = (opts) => ctx.model?.sample ? ctx.model.sample(opts) : Promise.reject(new Error("当前会话模型不可用"));
-    const raw = await generateSuggestions(dataDir, prompt, { sampleFn });
 
-    // ── 4. 解析 + 存 pending ──
-    const items = parseSuggestions(raw, cfg.count);
+    // ── 4. 生成 + 八股过滤（最多补一次） ──
+    // 写前禁令已压源头；这里对解析结果逐条扫八股正则，命中剔除（宁缺毋滥）
+    // 过滤后不够条数时原样重试一次（模型温度 0.9 有随机性），最多 2 次调用
+    let items = [];
+    for (let attempt = 1; attempt <= 2 && items.length < cfg.count; attempt++) {
+      const raw = await generateSuggestions(dataDir, prompt, { sampleFn });
+      const clean = parseSuggestions(raw, cfg.count).filter((it) => !hasAiFlavor(it.text));
+      // 保留两次中较好的一次（第二次更差时用第一次的）
+      if (clean.length > items.length) items = clean;
+    }
     if (!items.length) {
       return { content: [{ type: "text", text: "没能生成合适的推荐，可以再试一次" }] };
     }

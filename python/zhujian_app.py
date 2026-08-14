@@ -3,16 +3,16 @@
 """
 解语花 · 落樱悬浮球
 =====================
-桌面悬浮「落樱」：一朵会呼吸、会受风的小樱花。
-常态轻浮轻摆；光标掠过时按来风方向摇动、微微绽开；点击时旋花一下并弹出面板。
+桌面悬浮「落樱」：一枝会呼吸、会受风的小樱花。
+常态轻浮轻摆；悬停时零碎落瓣；按下时枝条蓄力弯曲，松手后快速回弹并洒落花瓣。
 
 三态：
-  ROLLED   （常态）  错拍微风 + 呼吸浮动
-  PEEKING  （悬停）  入场阵风 + 绽开 + 花粉微光
-  CLICK    （点击）  短促旋花 + 弹性放大
+  ROLLED   （常态）  花枝微摆 + 旧版体量花朵
+  PEEKING  （悬停）  入场阵风 + 一两枚碎瓣飘落
+  CLICK    （按压）  枝条压弯蓄力 → 松手越界回弹 + 两次花瓣簇
 
-渲染：SVG → pixmap 高清缩放（yinghua-ball.svg），
-通过弹簧阻尼、旋转、缩放和极轻量 QPainter 光点叠加动态。
+渲染：三个完整 SVG → pixmap 高清缩放（细枝 / 花朵 / 跟随叶），
+通过共同支点、弹簧阻尼和不同重量的相位差形成局部物理。
 
 通信：只调解语花插件的本地代理端口（127.0.0.1:18903），
 推荐生成 / 发送全部由插件进程执行，Python 只发 HTTP 和画 UI。
@@ -27,6 +27,7 @@ import sys
 import os
 import json
 import math
+import random
 import time
 import threading
 import urllib.request
@@ -68,22 +69,33 @@ PREFERENCES_PATH = os.path.join(HANA_HOME, "user", "preferences.json")
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 # ── 尺寸与渲染 ──
-BALL_SIZE = 64            # 透明悬浮窗尺寸
-FLOWER_SIZE = 34          # 对齐风铃铃铛主体的像素体量，小巧但保留摇摆空间
+BALL_SIZE = 80            # 透明悬浮窗尺寸；给花枝与跟随叶留出完整摇摆空间
+FLOWER_SIZE = 34          # 恢复旧版花朵体量；枝条、叶片与80px窗口保持新版结构
+BRANCH_SIZE = 80          # 主枝横穿透明窗并在两侧被裁断，暗示树冠延伸到画面外
+LEAF_SIZE = 56            # SVG 画布留白较多，放大后叶片本体约 18px
 SVG_SIZE = 400            # SVG 输出基准尺寸
 RENDER_SCALE = 3          # 高清渲染倍率
 RENDER_SIZE = SVG_SIZE * RENDER_SCALE
+FLOWER_CENTER = (50.0, 46.0)
+LEAF_CENTER = (31.0, 21.0)   # 叶柄贴在主枝与细枝的分叉附近
+BRANCH_PIVOT = (0.5, 31.5)   # 主枝从左边界进入，绕画外树身连接处轻摆
 
 # ── 微风动效参数 ──
 MIN_WIND_STRENGTH = 0.55
 MAX_WIND_STRENGTH = 1.35
 FULL_GUST_SPEED = 1100.0
-CLICK_BURST_DURATION = 0.62
+HOVER_PETAL_INTERVAL = (0.26, 0.52)
+PRESS_PETAL_COUNT = 11
+RELEASE_PETAL_COUNT = 16
+SWEEP_FADE_START = 24.0
+SWEEP_MIN_SPEED = 45.0
+SWEEP_PETAL_SPEED = 210.0
+MAX_PETAL_PARTICLES = 48
 
 # ── 鼠标 hover 滞回 ──
 EDGE_INSET = 16
-HOVER_ENTER_MARGIN = 10
-HOVER_EXIT_MARGIN = 24
+HOVER_ENTER_MARGIN = 4
+HOVER_EXIT_MARGIN = 12
 HOVER_LEAVE_DELAY = 0.24
 
 # ── 弹出窗垂直锚点（花朵中心位于弹出窗高度中的比例，0.5=居中） ──
@@ -179,12 +191,46 @@ def clamp_position(x, y, width, height, left, top, right, bottom, inset=EDGE_INS
     )
 
 
+def point_in_flower_zone(x, y, margin=0.0):
+    """只沿主枝、叶片和花朵附近响应，避免透明窗四角提前吃掉入场阵风。"""
+    x = float(x)
+    y = float(y)
+    margin = max(0.0, float(margin))
+    on_branch = -margin <= x <= BALL_SIZE + margin and 8.0 - margin <= y <= 36.0 + margin
+    flower_rx = 19.0 + margin
+    flower_ry = 18.0 + margin
+    on_flower = (
+        ((x - FLOWER_CENTER[0]) / flower_rx) ** 2
+        + ((y - FLOWER_CENTER[1]) / flower_ry) ** 2
+        <= 1.0
+    )
+    leaf_rx = 18.0 + margin
+    leaf_ry = 14.0 + margin
+    on_leaf = (
+        ((x - LEAF_CENTER[0]) / leaf_rx) ** 2
+        + ((y - LEAF_CENTER[1]) / leaf_ry) ** 2
+        <= 1.0
+    )
+    return on_branch or on_flower or on_leaf
+
+
+def segment_crosses_flower_zone(x1, y1, x2, y2, margin=0.0):
+    """采样两帧间的整段轨迹，防止高速光标从区域外直接穿过花枝。"""
+    distance = math.hypot(float(x2) - float(x1), float(y2) - float(y1))
+    steps = max(1, min(int(math.ceil(distance / 3.0)), 48))
+    for index in range(steps + 1):
+        ratio = index / steps
+        x = float(x1) + (float(x2) - float(x1)) * ratio
+        y = float(y1) + (float(y2) - float(y1)) * ratio
+        if point_in_flower_zone(x, y, margin):
+            return True
+    return False
+
+
 def resolve_hover_state(hovered, x, y, outside_elapsed, frame_elapsed):
-    """进入区与退出区分开，再加离开宽限，避免花朵边缘反复吃到阵风。"""
+    """沿可见花枝做进出滞回和离开宽限，避免透明区提前触发。"""
     margin = HOVER_EXIT_MARGIN if hovered else HOVER_ENTER_MARGIN
-    inside = -margin <= x <= BALL_SIZE + margin and \
-             -margin <= y <= BALL_SIZE + margin
-    if inside:
+    if point_in_flower_zone(x, y, margin):
         return True, 0.0
     if not hovered:
         return False, 0.0
@@ -201,21 +247,114 @@ def wind_strength_from_speed(speed):
     return MIN_WIND_STRENGTH + (MAX_WIND_STRENGTH - MIN_WIND_STRENGTH) * smooth
 
 
+def sweep_strength_from_speed(speed):
+    speed = max(0.0, float(speed))
+    if speed <= SWEEP_FADE_START:
+        return 0.0
+    fade_ratio = max(0.0, min((speed - SWEEP_FADE_START) / (SWEEP_MIN_SPEED * 2.0), 1.0))
+    fade = fade_ratio * fade_ratio * (3.0 - 2.0 * fade_ratio)
+    return wind_strength_from_speed(speed) * fade
+
+
 def calculate_entry_wind(previous_x, previous_y, current_x, current_y, elapsed, center_x):
-    """根据进入前的光标轨迹，判断风从哪边来以及这阵风有多强。"""
+    """进入风与连续风使用同一方向语义和渐入强度，避免刚进来先反向抽动。"""
     dx = float(current_x) - float(previous_x)
     dy = float(current_y) - float(previous_y)
     seconds = max(float(elapsed), 1.0 / 240.0)
     speed = math.hypot(dx, dy) / seconds
-    if float(previous_x) < float(center_x) - 2.0:
-        direction = -1.0
-    elif float(previous_x) > float(center_x) + 2.0:
-        direction = 1.0
-    elif abs(dx) >= 2.0:
-        direction = -1.0 if dx > 0 else 1.0
+    if abs(dx) >= abs(dy) * 0.42 and abs(dx) >= 0.55:
+        direction = -1.0 if dx > 0.0 else 1.0
+    elif abs(dy) >= 0.55:
+        direction = -1.0 if dy > 0.0 else 1.0
     else:
         direction = -1.0 if float(current_x) <= float(center_x) else 1.0
-    return direction, wind_strength_from_speed(speed)
+    return direction, sweep_strength_from_speed(speed)
+
+
+def should_apply_cursor_sweep(cursor_hovered, pressed, dragging):
+    return bool(cursor_hovered and not pressed and not dragging)
+
+
+def calculate_cursor_sweep(previous_x, previous_y, current_x, current_y, elapsed):
+    """连续读取掠过轨迹；风力从零渐入，避免阈值附近突然跳档。"""
+    dx = float(current_x) - float(previous_x)
+    dy = float(current_y) - float(previous_y)
+    distance = math.hypot(dx, dy)
+    seconds = max(float(elapsed), 1.0 / 240.0)
+    speed = distance / seconds
+    if speed < SWEEP_FADE_START or distance < 0.55:
+        return 0.0, 0.0, speed, 0.0, 0.0
+    if abs(dx) >= abs(dy) * 0.42:
+        direction = -1.0 if dx > 0.0 else 1.0
+    else:
+        direction = -1.0 if dy > 0.0 else 1.0
+    strength = sweep_strength_from_speed(speed)
+    return direction, strength, speed, dx / seconds, dy / seconds
+
+
+def petal_count_from_sweep_speed(speed):
+    """掠风按速度落 3/5/7/9 枚，最高仍低于按下时的 11 枚。"""
+    speed = max(0.0, float(speed))
+    if speed < SWEEP_PETAL_SPEED:
+        return 0
+    if speed < 560.0:
+        return 3
+    if speed < 920.0:
+        return 5
+    if speed < 1500.0:
+        return 7
+    return 9
+
+
+def cursor_wind_components(velocity_x, velocity_y, strength, direction):
+    """左右掠过负责横摆，上下掠过负责花头升降，斜向则按比例混合。"""
+    velocity_x = float(velocity_x)
+    velocity_y = float(velocity_y)
+    axis_total = max(abs(velocity_x) + abs(velocity_y), 1.0)
+    horizontal = float(direction) * float(strength) * abs(velocity_x) / axis_total
+    vertical_sign = 1.0 if velocity_y > 0.0 else -1.0 if velocity_y < 0.0 else 0.0
+    vertical = vertical_sign * float(strength) * abs(velocity_y) / axis_total
+    return horizontal, vertical
+
+
+def component_motion(t, bloom, gust, direction, rebound_pulse=0.0):
+    """花枝先受力，花朵随后，叶片拖尾；左右来风保持镜像。"""
+    bloom = max(0.0, min(float(bloom), 1.0))
+    gust = max(0.0, float(gust))
+    direction = -1.0 if float(direction) < 0.0 else 1.0
+    rebound_pulse = max(0.0, min(float(rebound_pulse), 1.0))
+    branch = direction * gust * 1.15 + bloom * 0.45 * math.sin(float(t) * 3.1)
+    flower = direction * gust * 0.72 + bloom * 0.78 * math.sin(float(t) * 3.8 + 0.48)
+    leaf = direction * gust * 4.8 + bloom * 3.2 * math.sin(float(t) * 4.15 + 1.18)
+    flower += direction * rebound_pulse * 1.25
+    leaf += direction * rebound_pulse * 7.5
+    return branch, flower, leaf
+
+
+def advance_press_spring(amount, velocity, pressed, dt):
+    """按住时蓄力下压，松开后快速越过原位并衰减回弹。"""
+    dt = max(0.0, min(float(dt), 0.05))
+    target = 1.0 if pressed else 0.0
+    stiffness = 82.0 if pressed else 118.0
+    damping = 16.0 if pressed else 10.5
+    acceleration = (target - float(amount)) * stiffness - float(velocity) * damping
+    velocity = float(velocity) + acceleration * dt
+    amount = float(amount) + velocity * dt
+    amount = max(-0.34, min(amount, 1.08))
+    return amount, velocity
+
+
+def rotate_point_around(x, y, pivot_x, pivot_y, angle_degrees):
+    """把局部点绕枝条支点旋转，供粒子从真实花心附近生成。"""
+    radians = math.radians(float(angle_degrees))
+    dx = float(x) - float(pivot_x)
+    dy = float(y) - float(pivot_y)
+    cosine = math.cos(radians)
+    sine = math.sin(radians)
+    return (
+        float(pivot_x) + dx * cosine - dy * sine,
+        float(pivot_y) + dx * sine + dy * cosine,
+    )
 
 
 def api_get(path, timeout=5):
@@ -635,10 +774,16 @@ class ZhujianBall(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setFixedSize(BALL_SIZE, BALL_SIZE)
 
-        # 高清预渲染 SVG（花朵，渲染到 RENDER_SIZE = 1200）
+        # 三个完整 SVG 各自预渲染：花枝定结构，花朵作主体，叶片负责拖尾。
+        # 不再按 elementId 拆花瓣，避免 QSvgRenderer 把局部元素拉伸成诡异圆块。
+        self.pix_branch = self._render_svg_to_pixmap("yinghua-branch.svg", RENDER_SIZE)
         self.pix_flower = self._render_svg_to_pixmap("yinghua-ball.svg", RENDER_SIZE)
-        if self.pix_flower.isNull():
-            print(f"[落樱] 警告：花朵 SVG 渲染失败，悬浮球会空白", file=sys.stderr)
+        self.pix_leaf = self._render_svg_to_pixmap("yinghua-leaf.svg", RENDER_SIZE)
+        self.layered_flower_ready = all(
+            not pix.isNull() for pix in (self.pix_branch, self.pix_flower, self.pix_leaf)
+        )
+        if not self.layered_flower_ready:
+            print("[落樱] 花枝/花朵/叶片资源渲染失败", file=sys.stderr)
 
         self.state = load_state()
         self.action = self.state.get("action") or "copy"
@@ -653,19 +798,28 @@ class ZhujianBall(QWidget):
         # 微风物理：花朵会随来风方向轻摆，移开后慢慢停稳
         self.angle = 0.0
         self.angular_velocity = 0.0
-        self.spin_angle = 0.0
-        self.spin_velocity = 0.0
         self.hover_wind = 0.0
         self.gust = 0.0
         self.gust_direction = 1.0
         self.hover_strength = 1.0
+        self.cursor_wind = 0.0
+        self.cursor_lift = 0.0
+        self.cursor_velocity = (0.0, 0.0)
         self.bloom = 0.0
 
         # 三态
         self.mode = "rolled"
         self.hovered = False
         self._hover_exit_elapsed = 0.0
-        self.click_timer = 0.0
+
+        # 按压弹簧 + 细碎花瓣。press_amount: 0=原位，1=压下，负值=松手后越界回弹。
+        self.pressed = False
+        self.press_amount = 0.0
+        self.press_velocity = 0.0
+        self.petal_particles = []
+        self._petal_rng = random.Random()
+        self._hover_petal_timer = self._petal_rng.uniform(*HOVER_PETAL_INTERVAL)
+        self._sweep_petal_cooldown = 0.0
 
         # 总时长与光标轨迹
         self.t = 0.0
@@ -709,6 +863,8 @@ class ZhujianBall(QWidget):
         pix.fill(Qt.GlobalColor.transparent)
         try:
             renderer = QSvgRenderer(path)
+            if not renderer.isValid():
+                return QPixmap()
             painter = QPainter(pix)
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
@@ -759,22 +915,69 @@ class ZhujianBall(QWidget):
         # 透明异形窗可能漏 enter/leave，每帧读全局光标判定（滞回）
         cursor_global = QCursor.pos()
         cursor = self.mapFromGlobal(cursor_global)
+        px, py, pts = self._cursor_sample
+        previous_cursor = self.mapFromGlobal(QPoint(int(px), int(py)))
         cursor_hovered, self._hover_exit_elapsed = resolve_hover_state(
             self.hovered, cursor.x(), cursor.y(), self._hover_exit_elapsed, frame_elapsed,
         )
-        if cursor_hovered and not self.hovered:
-            px, py, pts = self._cursor_sample
+        crossed_visible = segment_crosses_flower_zone(
+            previous_cursor.x(), previous_cursor.y(), cursor.x(), cursor.y(),
+            HOVER_ENTER_MARGIN,
+        )
+        if crossed_visible:
+            cursor_hovered = True
+            self._hover_exit_elapsed = 0.0
+        sample_elapsed = now - pts
+        sweep_direction, sweep_strength, sweep_speed, sweep_vx, sweep_vy = calculate_cursor_sweep(
+            px, py, cursor_global.x(), cursor_global.y(), sample_elapsed,
+        )
+        entered_now = cursor_hovered and not self.hovered
+        if entered_now and not self.pressed and self._drag is None:
             direction, strength = calculate_entry_wind(
-                px, py, cursor_global.x(), cursor_global.y(), now - pts,
+                px, py, cursor_global.x(), cursor_global.y(), sample_elapsed,
                 self.mapToGlobal(QPoint(BALL_SIZE // 2, BALL_SIZE // 2)).x(),
             )
             self.gust_direction = direction
             self.hover_strength = strength
             self.gust = strength
             self.angular_velocity += 14.0 * direction * strength
+            entry_petals = petal_count_from_sweep_speed(sweep_speed)
+            entry_petals = 3 if entry_petals <= 0 else min(entry_petals, 7)
+            self._spawn_petals(entry_petals, burst=False, wind=(sweep_vx, sweep_vy))
+            self._sweep_petal_cooldown = 0.22
+
+        allow_sweep = should_apply_cursor_sweep(
+            cursor_hovered, self.pressed, self._drag is not None,
+        )
+        if allow_sweep and sweep_strength > 0.0:
+            self.cursor_velocity = (sweep_vx, sweep_vy)
+            target_cursor_wind, target_cursor_lift = cursor_wind_components(
+                sweep_vx, sweep_vy, sweep_strength, sweep_direction,
+            )
+            blend = 1.0 - math.exp(-dt / 0.055)
+            self.cursor_wind += (target_cursor_wind - self.cursor_wind) * blend
+            self.cursor_lift += (target_cursor_lift - self.cursor_lift) * blend
+            self.hover_strength += (sweep_strength - self.hover_strength) * blend
+            if abs(self.cursor_wind) >= 0.08:
+                self.gust_direction = -1.0 if self.cursor_wind < 0.0 else 1.0
+            self.gust = max(self.gust, sweep_strength * 0.58)
+            petal_count = petal_count_from_sweep_speed(sweep_speed)
+            if petal_count > 0 and self._sweep_petal_cooldown <= 0.0:
+                self._spawn_petals(petal_count, burst=False, wind=(sweep_vx, sweep_vy))
+                self._sweep_petal_cooldown = 0.24
+        else:
+            self.cursor_wind *= math.exp(-dt / 0.16)
+            self.cursor_lift *= math.exp(-dt / 0.16)
+            self.cursor_velocity = (0.0, 0.0)
+            resting_strength = 0.24 if cursor_hovered and not self.pressed else 0.0
+            self.hover_strength += (resting_strength - self.hover_strength) * (
+                1.0 - math.exp(-dt / 0.30)
+            )
+
         self.hovered = cursor_hovered
         self.mode = "peeking" if self.hovered else "rolled"
         self._cursor_sample = (cursor_global.x(), cursor_global.y(), now)
+        self._sweep_petal_cooldown = max(0.0, self._sweep_petal_cooldown - dt)
 
         # 悬停风来得快、散得慢；和风铃一样保留一小段余韵
         wind_target = 1.0 if self.hovered else 0.0
@@ -790,27 +993,132 @@ class ZhujianBall(QWidget):
             + 0.14 * math.sin(self.t * 3.15 + 2.2)
         )
         hover_target = self.gust_direction * (
-            2.0
-            + self.hover_strength * 4.2 * math.sin(self.t * 4.2 + 0.35)
-            + self.hover_strength * 1.2 * math.sin(self.t * 7.1 + 1.4)
+            0.65
+            + self.hover_strength * 2.4 * math.sin(self.t * 4.2 + 0.35)
+            + self.hover_strength * 0.62 * math.sin(self.t * 7.1 + 1.4)
         )
         target_angle = base_wind * 3.6 * (1.0 - self.hover_wind) + hover_target * self.hover_wind
-        target_angle += self.gust_direction * 6.0 * self.gust
+        target_angle += (
+            self.gust_direction * 3.2 * self.gust
+            + self.cursor_wind * 5.4
+            + self.cursor_lift * 3.6
+        )
+        if self.pressed:
+            target_angle *= 0.18
         acceleration = (target_angle - self.angle) * 19.0 - self.angular_velocity * 6.2
         self.angular_velocity += acceleration * dt
         self.angle += self.angular_velocity * dt
         self.angle = max(-11.0, min(11.0, self.angle))
 
-        # 点击是一阵短促旋花，随后自然刹住；面板开合逻辑不受动画影响
-        if self.click_timer > 0.0:
-            self.click_timer = max(0.0, self.click_timer - dt)
-        self.spin_angle += self.spin_velocity * dt
-        self.spin_velocity *= math.exp(-dt / 0.34)
-        if abs(self.spin_velocity) < 0.2:
-            self.spin_velocity = 0.0
-            self.spin_angle %= 360.0
+        # 按住时枝条蓄力下压；松开后快速越界，再衰减回到原位。
+        self.press_amount, self.press_velocity = advance_press_spring(
+            self.press_amount, self.press_velocity, self.pressed, dt,
+        )
+        if not self.pressed and abs(self.press_amount) < 0.002 and abs(self.press_velocity) < 0.03:
+            self.press_amount = 0.0
+            self.press_velocity = 0.0
+
+        # 悬停只零碎落下一两枚小花瓣；按压与松手的较大花瓣簇由鼠标事件触发。
+        if self.hovered and not self.pressed:
+            self._hover_petal_timer -= dt
+            if self._hover_petal_timer <= 0.0:
+                self._spawn_petals(
+                    self._petal_rng.randint(1, 2), burst=False, wind=self.cursor_velocity,
+                )
+                self._hover_petal_timer = self._petal_rng.uniform(*HOVER_PETAL_INTERVAL)
+        else:
+            self._hover_petal_timer = min(
+                self._hover_petal_timer, HOVER_PETAL_INTERVAL[0],
+            )
+        self._update_petals(dt)
 
         self.update()
+
+    def _branch_angle(self):
+        rebound = max(0.0, -self.press_amount)
+        motion_scale = 0.18 if self.pressed else 1.0
+        effective_gust = max(self.gust, abs(self.cursor_wind) * 0.9) * motion_scale
+        effective_direction = -1.0 if self.cursor_wind < -0.03 else 1.0 if self.cursor_wind > 0.03 else self.gust_direction
+        branch_offset, _, _ = component_motion(
+            self.t, self.bloom, effective_gust, effective_direction, rebound,
+        )
+        return self.angle * 0.42 + branch_offset * 0.55 + self.press_amount * 4.8
+
+    def _flower_origin(self):
+        return rotate_point_around(
+            FLOWER_CENTER[0], FLOWER_CENTER[1],
+            BRANCH_PIVOT[0], BRANCH_PIVOT[1], self._branch_angle(),
+        )
+
+    def _spawn_petals(self, count, burst, wind=(0.0, 0.0)):
+        """生成 1~2px 碎瓣；掠风是有方向的小簇，点击仍是更盛大的放射簇。"""
+        cx, cy = self._flower_origin()
+        wind_x, wind_y = float(wind[0]), float(wind[1])
+        source_wind_speed = math.hypot(wind_x, wind_y)
+        swept = not burst and source_wind_speed > 0.0
+        if swept:
+            wind_scale = min(source_wind_speed * 0.024, 32.0) / source_wind_speed
+            wind_x *= wind_scale
+            wind_y *= wind_scale
+        for _ in range(max(0, int(count))):
+            size = self._petal_rng.uniform(0.82, 1.62 if burst else 1.28)
+            if burst:
+                direction = self._petal_rng.uniform(0.0, math.tau)
+                radius = self._petal_rng.uniform(10.0, 17.0)
+                speed = self._petal_rng.uniform(15.0, 31.0)
+                x = cx + math.cos(direction) * radius
+                y = cy + math.sin(direction) * radius * 0.72
+                vx = math.cos(direction) * speed
+                vy = math.sin(direction) * speed * 0.68 - 2.0
+                gravity = 15.0
+                sway = 1.5
+                life = self._petal_rng.uniform(0.82, 1.35)
+                spin_limit = 150.0
+            else:
+                direction = self._petal_rng.uniform(0.0, math.tau)
+                radius = self._petal_rng.uniform(11.0, 17.0)
+                x = cx + math.cos(direction) * radius
+                y = cy + math.sin(direction) * radius * 0.78
+                vx = self._petal_rng.uniform(-5.0, 5.0) + wind_x
+                vy = self._petal_rng.uniform(4.0, 8.5) + wind_y * 0.8
+                gravity = 22.0 if swept else 15.0
+                sway = 1.5 + min(source_wind_speed / 600.0, 2.4) if swept else 1.5
+                life = self._petal_rng.uniform(1.35, 1.95) if swept else self._petal_rng.uniform(0.82, 1.12)
+                spin_limit = min(150.0 + source_wind_speed * 0.08, 300.0) if swept else 150.0
+            self.petal_particles.append({
+                "x": x,
+                "y": y,
+                "vx": vx,
+                "vy": vy,
+                "size": size,
+                "angle": self._petal_rng.uniform(0.0, 360.0),
+                "spin": self._petal_rng.uniform(-spin_limit, spin_limit),
+                "phase": self._petal_rng.uniform(0.0, math.tau),
+                "gravity": gravity,
+                "sway": sway,
+                "age": 0.0,
+                "life": life,
+                "color": self._petal_rng.choice(("#f2b8c7", "#f7cfda", "#e9a3b8")),
+            })
+        if len(self.petal_particles) > MAX_PETAL_PARTICLES:
+            self.petal_particles = self.petal_particles[-MAX_PETAL_PARTICLES:]
+
+    def _update_petals(self, dt):
+        alive = []
+        for petal in self.petal_particles:
+            petal["age"] += dt
+            if petal["age"] >= petal["life"]:
+                continue
+            petal["vx"] *= math.exp(-dt * 0.72)
+            petal["vy"] += petal.get("gravity", 15.0) * dt
+            petal["x"] += petal["vx"] * dt + math.sin(
+                petal["age"] * 8.0 + petal["phase"]
+            ) * petal.get("sway", 1.5) * dt
+            petal["y"] += petal["vy"] * dt
+            petal["angle"] += petal["spin"] * dt
+            if petal["y"] <= BALL_SIZE + 3:
+                alive.append(petal)
+        self.petal_particles = alive
 
     # ── 绘制 ──
     def paintEvent(self, _e):
@@ -821,24 +1129,58 @@ class ZhujianBall(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
 
-        cx = BALL_SIZE / 2
-        cy = BALL_SIZE / 2
-        idle_breath = 0.024 * math.sin(self.t * 1.35)
-        click_phase = self.click_timer / CLICK_BURST_DURATION if self.click_timer > 0 else 0.0
-        click_pulse = math.sin((1.0 - click_phase) * math.pi) * 0.10 if click_phase else 0.0
-        scale = 1.0 + idle_breath + 0.045 * self.bloom + click_pulse
-        lift = -1.45 * math.sin(self.t * 1.05) - 1.0 * self.bloom
-        self._draw_layer(
-            p, self.pix_flower, self.angle + self.spin_angle,
-            cx, cy + lift, scale,
-        )
-        self._draw_pollen_glints(p, cx, cy, self.bloom, click_phase)
+        lift = -0.45 * math.sin(self.t * 1.05)
+        self._draw_flower(p, lift)
+        self._draw_petals(p)
         p.end()
 
-    def _draw_layer(self, p, pix, angle, cx, cy, flower_scale=1.0):
-        """把高清 SVG 花朵绕中心绘制，并保留四周摇摆余量。"""
+    def _draw_flower(self, p, lift):
+        """花朵保持旧版尺寸；按压只改变整枝弯曲，不再缩放花朵。"""
+        if not self.layered_flower_ready:
+            if not self._draw_layer(
+                p, self.pix_flower, FLOWER_SIZE,
+                self.angle, FLOWER_CENTER[0], FLOWER_CENTER[1] + lift, 1.0,
+            ):
+                self._draw_fallback_flower(
+                    p, FLOWER_CENTER[0], FLOWER_CENTER[1] + lift,
+                    FLOWER_SIZE / 47.0,
+                )
+            return
+
+        rebound = max(0.0, -self.press_amount)
+        motion_scale = 0.18 if self.pressed else 1.0
+        effective_gust = max(self.gust, abs(self.cursor_wind) * 0.9) * motion_scale
+        effective_direction = -1.0 if self.cursor_wind < -0.03 else 1.0 if self.cursor_wind > 0.03 else self.gust_direction
+        _, flower_offset, leaf_offset = component_motion(
+            self.t, self.bloom, effective_gust, effective_direction, rebound,
+        )
+        vertical_offset = self.cursor_lift * 2.8 * motion_scale
+        branch_angle = self._branch_angle()
+
+        # 整枝绕画外树身连接处弯下；松手后 press_amount 越过 0，形成快速回弹。
+        p.save()
+        p.translate(BRANCH_PIVOT[0], BRANCH_PIVOT[1])
+        p.rotate(branch_angle)
+        p.translate(-BRANCH_PIVOT[0], -BRANCH_PIVOT[1])
+        self._draw_layer(
+            p, self.pix_branch, BRANCH_SIZE, 0.0, BALL_SIZE / 2, BALL_SIZE / 2,
+        )
+        self._draw_layer(
+            p, self.pix_leaf, LEAF_SIZE, leaf_offset,
+            LEAF_CENTER[0], LEAF_CENTER[1] + lift * 0.35 + vertical_offset * 0.45,
+        )
+        self._draw_layer(
+            p, self.pix_flower, FLOWER_SIZE, flower_offset,
+            FLOWER_CENTER[0], FLOWER_CENTER[1] + lift + vertical_offset, 1.0,
+        )
+        p.restore()
+
+    def _draw_layer(self, p, pix, target_size, angle, cx, cy, layer_scale=1.0):
+        """把完整 SVG 作为一个零件围绕自身中心绘制；空资源安全跳过。"""
+        if pix is None or pix.isNull() or pix.width() <= 0:
+            return False
         pix_size = pix.width()
-        scale = (FLOWER_SIZE / pix_size) * flower_scale
+        scale = (target_size / pix_size) * layer_scale
         half = pix_size / 2
         p.save()
         p.translate(cx, cy)
@@ -847,31 +1189,64 @@ class ZhujianBall(QWidget):
         p.translate(-half, -half)
         p.drawPixmap(0, 0, pix)
         p.restore()
+        return True
 
-    def _draw_pollen_glints(self, p, cx, cy, hover, click_phase):
-        """悬停时浮起三点极淡花粉光，不生成粒子对象，克制且稳定。"""
-        strength = max(hover * 0.72, math.sin((1.0 - click_phase) * math.pi) if click_phase else 0.0)
-        if strength < 0.03:
-            return
+    def _draw_fallback_flower(self, p, cx, cy, flower_scale=1.0):
+        """SVG 全部失效时仍画一朵稳定简花，避免悬浮球空白或崩溃。"""
+        p.save()
+        p.translate(cx, cy)
+        p.scale(flower_scale, flower_scale)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor("#efb3c3"))
+        for _ in range(5):
+            p.drawEllipse(QPointF(0.0, -10.5), 7.8, 12.5)
+            p.rotate(72.0)
+        p.setBrush(QColor("#edc46f"))
+        p.drawEllipse(QPointF(0.0, 0.0), 5.2, 5.2)
+        p.restore()
+
+    def _draw_petals(self, p):
+        """绘制零碎小花瓣；单瓣始终小于 2px，不借数量偷换成大花瓣。"""
         p.save()
         p.setPen(Qt.PenStyle.NoPen)
-        for i, (radius, phase) in enumerate(((18.0, 0.2), (21.0, 2.3), (16.0, 4.4))):
-            orbit = self.t * (0.72 + i * 0.11) + phase
-            x = cx + math.cos(orbit) * radius
-            y = cy + math.sin(orbit * 0.86) * (radius * 0.62) - 2.0
-            alpha = int(150 * strength * (0.68 + 0.32 * math.sin(orbit * 1.7) ** 2))
-            p.setBrush(QColor(239, 191, 105, max(0, min(alpha, 180))))
-            dot = 1.15 + i * 0.18
-            p.drawEllipse(QPointF(x, y), dot, dot)
+        for petal in self.petal_particles:
+            progress = petal["age"] / max(petal["life"], 0.001)
+            alpha = int(205 * max(0.0, 1.0 - progress) ** 0.72)
+            color = QColor(petal["color"])
+            color.setAlpha(max(0, min(alpha, 205)))
+            p.setBrush(color)
+            p.save()
+            p.translate(petal["x"], petal["y"])
+            p.rotate(petal["angle"])
+            p.drawEllipse(
+                QPointF(0.0, 0.0),
+                petal["size"] * 0.62,
+                petal["size"],
+            )
+            p.restore()
         p.restore()
 
     # ── 鼠标交互 ──
+    def _begin_press_effect(self):
+        self.pressed = True
+        self.press_amount = max(self.press_amount, 0.18)
+        self.press_velocity = max(self.press_velocity, 2.6)
+        self._spawn_petals(PRESS_PETAL_COUNT, burst=True)
+
+    def _end_press_effect(self):
+        if not self.pressed:
+            return
+        self.pressed = False
+        self.press_velocity = min(self.press_velocity, -8.4)
+        self._spawn_petals(RELEASE_PETAL_COUNT, burst=True)
+
     def mousePressEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
             self._drag_menu_was_visible = bool(self.menu and self.menu.isVisible())
             self._press_global = e.globalPosition().toPoint()
             self._drag = self._press_global - self.pos()
             self._moved = False
+            self._begin_press_effect()
         e.accept()
 
     def mouseMoveEvent(self, e):
@@ -888,6 +1263,7 @@ class ZhujianBall(QWidget):
 
     def mouseReleaseEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
+            self._end_press_effect()
             if self._moved:
                 self._snap()
                 self._save_pos()
@@ -931,10 +1307,6 @@ class ZhujianBall(QWidget):
         if self.menu and self.menu.isVisible():
             self._close_menu()
             return
-        # 点击像被指尖拨了一下：旋花 + 轻微绽放，同时打开面板
-        self.click_timer = CLICK_BURST_DURATION
-        self.spin_velocity += 430.0 * self.gust_direction
-        self.angular_velocity += 18.0 * self.gust_direction
         self._open_menu()
 
     def _close_menu(self):
