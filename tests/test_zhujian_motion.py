@@ -17,6 +17,214 @@ SPEC.loader.exec_module(zhujian)
 
 
 class ZhujianMotionTests(unittest.TestCase):
+    def test_ask_poll_uses_latest_question_and_custom_input_has_200_char_limit(self):
+        pending = [
+            {"askId": "broken", "ts": "not-a-number"},
+            {"askId": "old", "ts": 10},
+            {"askId": "new", "ts": 20},
+        ]
+        self.assertEqual(zhujian.latest_ask_pending(pending)["askId"], "new")
+        self.assertEqual(len(zhujian.normalize_custom_answer("x" * 300)), 200)
+        self.assertEqual(zhujian.normalize_custom_answer("  好呀  "), "好呀")
+
+    def test_ask_option_description_supports_word_wrap(self):
+        app = zhujian.QApplication.instance() or zhujian.QApplication([])
+        frame = zhujian.AskOptionFrame("先做核心功能", "这是一段很长的说明，用来确认选项说明会自动换行而不是把面板横向撑破。")
+        description = frame.findChild(zhujian.QLabel, "askDescription")
+        self.assertIsNotNone(description)
+        self.assertTrue(description.wordWrap())
+        frame.close()
+        frame.deleteLater()
+        app.processEvents()
+
+    def test_ask_transition_does_not_replace_inflight_question(self):
+        app = zhujian.QApplication.instance() or zhujian.QApplication([])
+        ball = zhujian.ZhujianBall()
+        menu = zhujian.ZhujianMenu(ball)
+        menu.show()
+        first = {
+            "askId": "ask-first",
+            "question": "第一题",
+            "options": [{"label": "先做"}, {"label": "先看"}],
+            "ts": 1,
+        }
+        second = {
+            "askId": "ask-second",
+            "question": "第二题",
+            "options": [{"label": "继续"}, {"label": "暂停"}],
+            "ts": 2,
+        }
+        menu.show_ask(first)
+        app.processEvents()
+        ball.menu = menu
+        menu.hide()
+        ball._apply_ask_payload({"ok": True, "pending": [first]})
+        app.processEvents()
+        self.assertTrue(menu.is_ask_open())
+        self.assertEqual(menu.lbl_ask_question.text(), "第一题")
+        menu._ask_responding = True
+        menu.show_ask(second)
+        self.assertEqual(menu._ask_entry["askId"], "ask-first")
+        menu._ask_responding = False
+        menu._ask_finished = True
+        menu.restore_recommendations("ask-second")
+        self.assertEqual(menu._ask_entry["askId"], "ask-first")
+        menu.restore_recommendations("ask-first")
+        self.assertIsNone(menu._ask_entry)
+        menu.close()
+        ball.close()
+        app.processEvents()
+
+    def test_collapsed_ask_stays_collapsed_when_menu_hidden(self):
+        # 折叠（放弃）后服务端作废失败/延迟时，轮询仍返回这条题：菜单关着也绝不弹回
+        app = zhujian.QApplication.instance() or zhujian.QApplication([])
+        ball = zhujian.ZhujianBall()
+        menu = zhujian.ZhujianMenu(ball)
+        ball.menu = menu
+        ask = {
+            "askId": "ask-collapse-1",
+            "question": "要折叠的题",
+            "options": [{"label": "甲"}, {"label": "乙"}],
+            "ts": 1,
+        }
+        menu.show_ask(ask)
+        app.processEvents()
+        # 用户第二次点击：折叠（放弃）
+        menu._collapsed_ask_ids.append("ask-collapse-1")
+        menu.restore_recommendations()
+        menu.hide()
+        app.processEvents()
+        ball._apply_ask_payload({"ok": True, "pending": [ask]})
+        app.processEvents()
+        self.assertFalse(menu.isVisible())
+        self.assertFalse(menu.is_ask_open())
+        menu.close()
+        ball.close()
+        app.processEvents()
+
+    def test_collapsed_ask_does_not_pop_back_when_menu_reopened(self):
+        # 回归：折叠后用户重新打开菜单（推荐态可见），轮询不得把题弹回来，
+        # 更不能在弹回时清掉折叠集合（否则进入「关了又弹」的死循环）
+        app = zhujian.QApplication.instance() or zhujian.QApplication([])
+        ball = zhujian.ZhujianBall()
+        menu = zhujian.ZhujianMenu(ball)
+        ball.menu = menu
+        ask = {
+            "askId": "ask-collapse-2",
+            "question": "折叠后重开菜单",
+            "options": [{"label": "甲"}, {"label": "乙"}],
+            "ts": 2,
+        }
+        menu.show_ask(ask)
+        app.processEvents()
+        menu._collapsed_ask_ids.append("ask-collapse-2")
+        menu.restore_recommendations()
+        menu.hide()
+        app.processEvents()
+        # 用户重新点球打开菜单（推荐态）
+        menu.show()
+        app.processEvents()
+        ball._apply_ask_payload({"ok": True, "pending": [ask]})
+        app.processEvents()
+        self.assertFalse(menu.is_ask_open())
+        self.assertIn("ask-collapse-2", menu._collapsed_ask_ids)
+        menu.close()
+        ball.close()
+        app.processEvents()
+
+    def test_new_ask_still_pops_even_after_previous_collapse(self):
+        # 折叠过旧题不影响新题弹出；show_ask 也不得清理折叠集合
+        app = zhujian.QApplication.instance() or zhujian.QApplication([])
+        ball = zhujian.ZhujianBall()
+        menu = zhujian.ZhujianMenu(ball)
+        ball.menu = menu
+        old = {"askId": "ask-old", "question": "旧题", "options": [{"label": "甲"}], "ts": 1}
+        new = {"askId": "ask-new", "question": "新题", "options": [{"label": "继续"}], "ts": 3}
+        menu.show_ask(old)
+        app.processEvents()
+        menu._collapsed_ask_ids.append("ask-old")
+        menu.restore_recommendations()
+        menu.hide()
+        menu.show()
+        app.processEvents()
+        ball._apply_ask_payload({"ok": True, "pending": [old, new]})
+        app.processEvents()
+        self.assertTrue(menu.is_ask_open())
+        self.assertEqual(menu._ask_entry["askId"], "ask-new")
+        self.assertIn("ask-old", menu._collapsed_ask_ids)
+        menu.close()
+        ball.close()
+        app.processEvents()
+
+    def test_cache_response_rerender_keeps_rec_height(self):
+        # 回归：推荐条渲染后 cache 响应回来再次渲染，布局未稳定时立即 adjustSize
+        # 会把换行 QLabel 压扁（面板缩矮、推荐条 1px，右缘残字）。延迟同步后高度必须正常。
+        app = zhujian.QApplication.instance() or zhujian.QApplication([])
+        ball = zhujian.ZhujianBall()
+        menu = zhujian.ZhujianMenu(ball)
+        ball.menu = menu
+        long_text = "这条推荐比较长，用来测试换行效果，看看面板高度是否正常撑起"
+        ball.cached = {
+            "items": [
+                {"text": long_text, "direction": "追问"},
+                {"text": "第二条推荐也很长，测试文字溢出问题", "direction": "行动"},
+                {"text": "第三条短推荐", "direction": "玩笑"},
+            ],
+            "rid": "r_test_1",
+            "ts": 0,
+        }
+        menu.show()
+        menu.prepare_for_show()
+        for _ in range(5):
+            app.processEvents()
+        # 模拟 load_cache_async 的响应回来（重新渲染推荐条）
+        menu.refresh_ready.emit({
+            "source": "cache",
+            "items": ball.cached["items"],
+            "rid": "r_test_1",
+            "ts": 0,
+            "target": None,
+            "fromCache": True,
+        })
+        for _ in range(5):
+            app.processEvents()
+        self.assertEqual(len(menu.buttons), 3)
+        for rec in menu.buttons:
+            self.assertGreater(rec.height(), 20, f"推荐条被压扁: {rec.height()}px")
+            self.assertLessEqual(rec.width(), 344, f"推荐条宽度溢出面板: {rec.width()}px")
+        self.assertGreater(menu.height(), 300, f"面板高度被压矮: {menu.height()}px")
+        menu.close()
+        ball.close()
+        app.processEvents()
+
+    def test_toggle_expand_two_clicks_folds_and_third_opens_recommendations(self):
+        # 端到端：第一次点击只提醒，第二次折叠+关闭，第三次打开的是推荐态而非旧题
+        app = zhujian.QApplication.instance() or zhujian.QApplication([])
+        ball = zhujian.ZhujianBall()
+        menu = zhujian.ZhujianMenu(ball)
+        ball.menu = menu
+        ask = {"askId": "ask-fold", "question": "折叠吧", "options": [{"label": "甲"}], "ts": 4}
+        menu.show_ask(ask)
+        menu.move_to_ball()
+        menu.show()
+        app.processEvents()
+        # 第一次点击：只提醒不折叠
+        ball._toggle_expand()
+        self.assertTrue(menu.isVisible())
+        self.assertTrue(menu._ask_close_armed)
+        # 第二次点击：折叠 + 关闭
+        ball._toggle_expand()
+        self.assertFalse(menu.isVisible())
+        self.assertFalse(menu.is_ask_open())
+        self.assertIn("ask-fold", menu._collapsed_ask_ids)
+        # 第三次点击：打开的是推荐态，不是旧题
+        ball._toggle_expand()
+        self.assertTrue(menu.isVisible())
+        self.assertFalse(menu.is_ask_open())
+        menu.close()
+        ball.close()
+        app.processEvents()
+
     def test_wind_strength_is_bounded_and_increases_with_speed(self):
         slow = zhujian.wind_strength_from_speed(0)
         medium = zhujian.wind_strength_from_speed(550)

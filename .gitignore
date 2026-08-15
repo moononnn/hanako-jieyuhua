@@ -7,3 +7,6 @@ _backups/
 node_modules/
 __pycache__/
 *.pyc
+
+新窗口交接-*.md
+施工方案-*.md

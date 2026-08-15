@@ -19,8 +19,9 @@
 
 启动: python zhujian_app.py
 环境变量:
-  JIEGEHUA_API  解语花本地代理地址（默认 http://127.0.0.1:18903）
-  HANA_HOME     Hana 数据目录（存状态文件用）
+  JIEGEHUA_API        解语花本地代理地址（默认 http://127.0.0.1:18903）
+  JIEGEHUA_API_TOKEN  提问面板本地通道令牌（由插件进程注入）
+  HANA_HOME            Hana 数据目录（存状态文件用）
 """
 
 import sys
@@ -39,7 +40,7 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtWidgets import (
-    QApplication, QWidget, QPushButton, QLabel, QFrame,
+    QApplication, QWidget, QPushButton, QLabel, QFrame, QLineEdit, QScrollArea,
     QVBoxLayout, QHBoxLayout, QGridLayout, QSizePolicy,
 )
 
@@ -62,7 +63,79 @@ class RecLabel(QLabel):
         super().mousePressEvent(e)
 
 
+# ── 提问选项：复用推荐展板，不另开第二个窗口 ──
+class AskChoiceLabel(QLabel):
+    clicked = pyqtSignal()
+
+    def __init__(self, text):
+        super().__init__(text)
+        self.setObjectName("askChoice")
+        self.setWordWrap(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.setContentsMargins(10, 8, 10, 8)
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton and self.isEnabled():
+            self.clicked.emit()
+        e.accept()
+
+
+class AskOptionFrame(QFrame):
+    # 提问作答强制直接回传：点击选项/发送按钮走 /ask/respond 的 deferred 通道，
+    # 与推荐条的「直接发出/复制到剪贴板」模式（ball.action）完全无关，
+    # 复制模式的用户点这里也是直接作答。改这条链路时不要接进 ball.action 分支。
+    def __init__(self, label, description="", recommended=False):
+        super().__init__()
+        self.setObjectName("askOption")
+        # 垂直 Expanding：同排选项在 QGridLayout 里等高（行高取最高卡片），文字超了整排一起放大
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        head = QHBoxLayout()
+        head.setContentsMargins(0, 0, 0, 0)
+        head.setSpacing(3)
+        self.choice_label = AskChoiceLabel(label)
+        head.addWidget(self.choice_label, 1)
+        if recommended:
+            badge = QLabel("推荐")
+            badge.setObjectName("askRecommended")
+            head.addWidget(badge, 0, Qt.AlignmentFlag.AlignTop)
+        layout.addLayout(head)
+        if description:
+            detail = QLabel(description)
+            detail.setObjectName("askDescription")
+            detail.setWordWrap(True)
+            detail.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+            layout.addWidget(detail)
+        # 弹性吸收：等高拉伸后内容顶部对齐，底部空白均匀
+        layout.addStretch(1)
+
+
+def latest_ask_pending(pending):
+    """只展示最新一条提问；旧提问留在服务端等过期/清理。"""
+    if not isinstance(pending, list):
+        return None
+    valid = [item for item in pending if isinstance(item, dict) and item.get("askId")]
+    if not valid:
+        return None
+
+    def timestamp(item):
+        try:
+            return int(item.get("ts") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    return max(valid, key=timestamp)
+
+
+def normalize_custom_answer(text):
+    return str(text or "").strip()[:ASK_INPUT_MAX_LENGTH]
+
+
 API_BASE = os.environ.get("JIEGEHUA_API", "http://127.0.0.1:18903")
+API_TOKEN = os.environ.get("JIEGEHUA_API_TOKEN", "")
 HANA_HOME = os.environ.get("HANA_HOME", os.path.join(os.path.expanduser("~"), ".hanako"))
 STATE_PATH = os.path.join(HANA_HOME, "data", "jiegehua", "zhujian-state.json")
 PREFERENCES_PATH = os.path.join(HANA_HOME, "user", "preferences.json")
@@ -102,19 +175,22 @@ HOVER_LEAVE_DELAY = 0.24
 PANEL_ANCHOR_RATIO = 0.38   # 左键推荐面板：花在面板上部，面板主体在花下方（实机确认）
 MENU_ANCHOR_RATIO = 0.33    # 右键发送浮签：主体在花下方，与面板视觉呼应
 TARGET_SESSION_LIMIT = 5    # 目标选择只展示最近活跃的 5 个窗口，避免面板过长
+ASK_INPUT_MAX_LENGTH = 200  # 自定义回答上限，和服务端校验保持一致
+ASK_POLL_INTERVAL_MS = 1500
+ASK_PANEL_MAX_HEIGHT = 600
 
 # ── 手帐风配色：保留落樱自己的薄荷绿与粉色，明暗随 Hana 切换 ──
 DARK_THEME_IDS = {"midnight", "midnight-contrast"}
 THEME_COLORS = {
     "light": {
         "panel": "#fbf8ef", "surface": "#fffdf7", "surface_alt": "#eef6f1",
-        "border": "#b6d1c4", "ink": "#3e4b43", "sub": "#7f8e85",
+        "border": "#b6d1c4", "ink": "#3e4b43", "sub": "#7f8e85", "sub_deep": "#6b7a71",
         "accent": "#5b9a82", "accent_deep": "#3f705d", "accent_text": "#ffffff",
         "pink": "#d893a6", "danger_bg": "#f9edf0", "shadow": "#526a60",
     },
     "dark": {
         "panel": "#384850", "surface": "#42545c", "surface_alt": "#465c5c",
-        "border": "#6b877d", "ink": "#e7efeb", "sub": "#b5c4bd",
+        "border": "#6b877d", "ink": "#e7efeb", "sub": "#b5c4bd", "sub_deep": "#a4b4ac",
         "accent": "#86bba6", "accent_deep": "#cfe7dc", "accent_text": "#263a34",
         "pink": "#dda9b7", "danger_bg": "#51464d", "shadow": "#172126",
     },
@@ -357,8 +433,16 @@ def rotate_point_around(x, y, pivot_x, pivot_y, angle_degrees):
     )
 
 
+def _api_headers(extra=None):
+    headers = dict(extra or {})
+    if API_TOKEN:
+        headers["X-Jiegehua-Token"] = API_TOKEN
+    return headers
+
+
 def api_get(path, timeout=5):
-    with urllib.request.urlopen(API_BASE + path, timeout=timeout) as resp:
+    req = urllib.request.Request(API_BASE + path, headers=_api_headers())
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
@@ -366,7 +450,7 @@ def api_post(path, payload, timeout=12):
     req = urllib.request.Request(
         API_BASE + path,
         data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers=_api_headers({"Content-Type": "application/json"}),
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
@@ -764,6 +848,8 @@ class TargetMenu(QFrame):
 #  落樱悬浮球
 # ─────────────────────────────
 class ZhujianBall(QWidget):
+    ask_ready = pyqtSignal(object)
+
     def __init__(self):
         super().__init__(None)
         self.setWindowFlags(
@@ -820,6 +906,10 @@ class ZhujianBall(QWidget):
         self._petal_rng = random.Random()
         self._hover_petal_timer = self._petal_rng.uniform(*HOVER_PETAL_INTERVAL)
         self._sweep_petal_cooldown = 0.0
+        # 提问挂起时持续散发细小花瓣（点击花朵同款放射簇，低密度）
+        self._ask_emitting = False
+        self._ask_petal_timer = 0.0
+        self._ask_bounce_timer = 0.0
 
         # 总时长与光标轨迹
         self.t = 0.0
@@ -833,6 +923,12 @@ class ZhujianBall(QWidget):
         self._moved = False
         self._drag_menu_was_visible = False
         self.menu = None
+        self._ask_poll_inflight = False
+        self.ask_ready.connect(self._apply_ask_payload)
+
+        self.ask_poll_timer = QTimer(self)
+        self.ask_poll_timer.timeout.connect(self._poll_ask_async)
+        self.ask_poll_timer.start(ASK_POLL_INTERVAL_MS)
 
         timer = QTimer(self)
         timer.timeout.connect(self._tick)
@@ -843,6 +939,54 @@ class ZhujianBall(QWidget):
         self.theme_timer.start(1500)
 
         self._place_from_state()
+
+    # ── 提问轮询：网络在线程，界面回主线程 ──
+    def _poll_ask_async(self):
+        if self._ask_poll_inflight:
+            return
+        self._ask_poll_inflight = True
+
+        def worker():
+            payload = {"ok": False, "pending": []}
+            try:
+                data = api_get("/ask/pending", timeout=4)
+                if data.get("ok"):
+                    payload = {"ok": True, "pending": data.get("pending") or []}
+            except Exception:
+                pass
+            try:
+                self.ask_ready.emit(payload)
+            except RuntimeError:
+                pass
+
+        threading.Thread(target=worker, daemon=True, name="zhujian-ask-poll").start()
+
+    def _apply_ask_payload(self, payload):
+        self._ask_poll_inflight = False
+        if not payload.get("ok"):
+            return
+        ask = latest_ask_pending(payload.get("pending"))
+        if ask is not None:
+            if self.menu is None:
+                self.menu = ZhujianMenu(self)
+            # 折叠（放弃）过的提问不再弹出——无论菜单是否可见都挡，
+            # 防止「折叠后重新打开菜单又被弹回、标志被 show_ask 重置」的死循环；
+            # 新提问（askId 不在集合）照常弹出。
+            if ask.get("askId") in self.menu._collapsed_ask_ids:
+                return
+            if not self.menu.isVisible():
+                # 已经在提问态时只重新显示原面板，不能先 prepare_for_show 把提问替换成推荐。
+                if not self.menu.is_ask_open():
+                    self.menu.prepare_for_show()
+                self.menu.move_to_ball()
+                self.menu.show()
+                self.menu.raise_()
+                self.menu.activateWindow()
+            self.menu.show_ask(ask)
+            self.menu.raise_()
+            return
+        if self.menu is not None and self.menu.is_ask_open():
+            self.menu.restore_recommendations()
 
     def _sync_theme(self):
         mode = read_hana_theme_mode()
@@ -1030,6 +1174,20 @@ class ZhujianBall(QWidget):
             self._hover_petal_timer = min(
                 self._hover_petal_timer, HOVER_PETAL_INTERVAL[0],
             )
+        # 提问挂起：花朵持续散发花瓣 + 周期性轻拨树枝（弹簧回弹，视觉上一直在晃）
+        if self._ask_emitting:
+            self._ask_petal_timer -= dt
+            if self._ask_petal_timer <= 0.0:
+                self._spawn_petals(self._petal_rng.randint(4, 6), burst=True, size_scale=1.8)
+                self._ask_petal_timer = self._petal_rng.uniform(0.22, 0.38)
+            if not self.pressed:
+                self._ask_bounce_timer -= dt
+                if self._ask_bounce_timer <= 0.0:
+                    # 直接把枝条推到明显下压位再回弹，幅度才看得见（仅脉冲力度太小）
+                    self.press_amount = max(self.press_amount, 0.6)
+                    self.press_velocity = max(self.press_velocity, 2.2)
+                    self._spawn_petals(self._petal_rng.randint(2, 3), burst=True, size_scale=1.4)
+                    self._ask_bounce_timer = self._petal_rng.uniform(0.6, 1.1)
         self._update_petals(dt)
 
         self.update()
@@ -1050,8 +1208,9 @@ class ZhujianBall(QWidget):
             BRANCH_PIVOT[0], BRANCH_PIVOT[1], self._branch_angle(),
         )
 
-    def _spawn_petals(self, count, burst, wind=(0.0, 0.0)):
-        """生成 1~2px 碎瓣；掠风是有方向的小簇，点击仍是更盛大的放射簇。"""
+    def _spawn_petals(self, count, burst, wind=(0.0, 0.0), size_scale=1.0):
+        """生成碎瓣；掠风是有方向的小簇，点击仍是更盛大的放射簇。
+        size_scale 用于 ask 提醒场景把花瓣放大约 1.8 倍，更显眼。"""
         cx, cy = self._flower_origin()
         wind_x, wind_y = float(wind[0]), float(wind[1])
         source_wind_speed = math.hypot(wind_x, wind_y)
@@ -1061,7 +1220,7 @@ class ZhujianBall(QWidget):
             wind_x *= wind_scale
             wind_y *= wind_scale
         for _ in range(max(0, int(count))):
-            size = self._petal_rng.uniform(0.82, 1.62 if burst else 1.28)
+            size = self._petal_rng.uniform(0.82, 1.62 if burst else 1.28) * size_scale
             if burst:
                 direction = self._petal_rng.uniform(0.0, math.tau)
                 radius = self._petal_rng.uniform(10.0, 17.0)
@@ -1305,6 +1464,28 @@ class ZhujianBall(QWidget):
     # ── 展开 / 收起 ──
     def _toggle_expand(self):
         if self.menu and self.menu.isVisible():
+            if self.menu.is_ask_open():
+                # 提问挂起：第一次点击只提醒不折叠，第二次确认后折叠
+                if not self.menu._ask_close_armed:
+                    self.menu._ask_close_armed = True
+                    self.menu._ask_warn_close()
+                    return
+                # 第二次点击 = 确认放弃这条提问：本地恢复推荐 + 服务端静默作废（不回传）
+                dismiss_ask_id = self.menu._ask_entry.get("askId") or ""
+                if dismiss_ask_id:
+                    self.menu._collapsed_ask_ids.append(dismiss_ask_id)
+                    if len(self.menu._collapsed_ask_ids) > 50:
+                        del self.menu._collapsed_ask_ids[:-50]
+                self.menu.restore_recommendations()
+                if dismiss_ask_id:
+                    def dismiss_worker():
+                        try:
+                            api_post("/ask/dismiss", {"askId": dismiss_ask_id}, timeout=5)
+                        except Exception:
+                            pass
+                    threading.Thread(
+                        target=dismiss_worker, daemon=True, name="zhujian-ask-dismiss",
+                    ).start()
             self._close_menu()
             return
         self._open_menu()
@@ -1335,7 +1516,8 @@ class ZhujianBall(QWidget):
     def _open_menu(self):
         if self.menu is None:
             self.menu = ZhujianMenu(self)
-        self.menu.prepare_for_show()
+        if not self.menu.is_ask_open():
+            self.menu.prepare_for_show()
         self.menu.move_to_ball()
         self.menu.show()
         self.menu.raise_()
@@ -1350,6 +1532,7 @@ class ZhujianMenu(QFrame):
     target_ready = pyqtSignal(object)
     rename_ready = pyqtSignal(object)
     undo_ready = pyqtSignal(object)
+    ask_response_ready = pyqtSignal(object)
 
     def __init__(self, ball):
         super().__init__(None)
@@ -1377,10 +1560,23 @@ class ZhujianMenu(QFrame):
         self._drag_moved = False
         self._needs_reanchor = False  # 本次打开后内容尚未以完整高度锚定过
         self._user_dragged = False    # 本次打开后用户是否手动拖过面板（拖过则尊重手动位置）
+        self._ask_entry = None
+        self._ask_restore_cache = None
+        self._ask_option_frames = []
+        self._ask_responding = False
+        self._ask_finished = False
+        # 确认式折叠：ask 挂起时第一次点球只提醒，第二次才收起；
+        # _collapsed_ask_ids 记录用户主动折叠（放弃）的提问 id，轮询不再弹出这些题；
+        # 新提问（askId 不在集合里）照常弹出（花朵花瓣继续提醒）
+        self._ask_close_armed = False
+        self._collapsed_ask_ids = []
+        self._ask_response_mode = ""
+        self._ask_response_choice = ""
         self.refresh_ready.connect(self._apply_async_refresh)
         self.target_ready.connect(self._apply_target_state)
         self.rename_ready.connect(self._apply_rename_result)
         self.undo_ready.connect(self._apply_undo_result)
+        self.ask_response_ready.connect(self._apply_ask_response)
         self._build_ui()
 
     def _build_ui(self):
@@ -1418,10 +1614,67 @@ class ZhujianMenu(QFrame):
         self.target_menu.hide()
         root.addWidget(self.target_menu)
 
+        # 提问模式复用同一块展板：推荐条暂时让位，答完后恢复原缓存。
+        self.ask_scroll = QScrollArea()
+        self.ask_scroll.setObjectName("askScroll")
+        self.ask_scroll.setAutoFillBackground(False)
+        self.ask_scroll.viewport().setAutoFillBackground(False)
+        self.ask_scroll.setWidgetResizable(True)
+        self.ask_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.ask_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.ask_scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.ask_body = QFrame()
+        self.ask_body.setObjectName("askBody")
+        ask_body_layout = QVBoxLayout(self.ask_body)
+        ask_body_layout.setContentsMargins(0, 0, 0, 0)
+        ask_body_layout.setSpacing(8)
+        self.lbl_ask_from = QLabel("")
+        self.lbl_ask_from.setObjectName("askFrom")
+        self.lbl_ask_from.setWordWrap(True)
+        self.lbl_ask_from.hide()
+        ask_body_layout.addWidget(self.lbl_ask_from)
+        self.lbl_ask_question = QLabel("")
+        self.lbl_ask_question.setObjectName("askQuestion")
+        self.lbl_ask_question.setWordWrap(True)
+        ask_body_layout.addWidget(self.lbl_ask_question)
+        self.ask_options_grid = QGridLayout()
+        self.ask_options_grid.setContentsMargins(0, 0, 0, 0)
+        self.ask_options_grid.setSpacing(8)
+        ask_body_layout.addLayout(self.ask_options_grid)
+        ask_body_layout.addStretch(1)
+        self.ask_scroll.setWidget(self.ask_body)
+        self.ask_scroll.hide()
+        root.addWidget(self.ask_scroll)
+
         self.grid = QGridLayout()
         self.grid.setSpacing(8)
         self.buttons = []
         root.addLayout(self.grid)
+
+        self.ask_input = QLineEdit()
+        self.ask_input.setObjectName("askInput")
+        self.ask_input.setMaxLength(ASK_INPUT_MAX_LENGTH)
+        # 俏皮文案：弹窗里能写，主对话框直接说也行（隐式跳开会静默收起提问，助手上下文仍能对上）
+        # 字号调小到 10px 保证这 26 个字在输入框里完整显示
+        self.ask_input.setPlaceholderText("在此输入文本（嘻嘻，惯性思维了不是？在哪输入不是输入呢？）")
+        self.ask_input.returnPressed.connect(self._send_custom_ask)
+        self.ask_input.hide()
+        root.addWidget(self.ask_input)
+        self.btn_ask_skip = QPushButton("跳过本题")
+        self.btn_ask_skip.setObjectName("askSkip")
+        self.btn_ask_skip.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_ask_skip.clicked.connect(lambda: self._respond_ask("skip", ""))
+        self.btn_ask_skip.hide()
+        self.btn_ask_send = QPushButton("发送")
+        self.btn_ask_send.setObjectName("askSend")
+        self.btn_ask_send.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_ask_send.clicked.connect(self._send_custom_ask)
+        self.btn_ask_send.hide()
+        ask_actions = QHBoxLayout()
+        ask_actions.setSpacing(8)
+        ask_actions.addWidget(self.btn_ask_skip)
+        ask_actions.addWidget(self.btn_ask_send)
+        root.addLayout(ask_actions)
 
         self.lbl_feedback = QLabel("")
         self.lbl_feedback.setObjectName("feedback")
@@ -1494,6 +1747,56 @@ class ZhujianMenu(QFrame):
             QLabel#sectionTitle {{ color: {c['accent_deep']}; font-size: 12px; font-weight: 700; }}
             QLabel#renameHint {{ color: {c['sub']}; font-size: 10px; }}
             QLabel#cacheTime {{ color: {c['sub']}; font-size: 10px; }}
+            QScrollArea#askScroll {{
+                border: none; background: transparent;
+            }}
+            QScrollBar:vertical {{
+                width: 8px; background: transparent; margin: 3px 0;
+            }}
+            QScrollBar::handle:vertical {{
+                min-height: 26px; background: {c['border']}; border-radius: 4px;
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+            QLabel#askQuestion {{
+                color: {c['accent_deep']}; font-size: 14px; font-weight: 700;
+                background: {c['surface_alt']}; border-radius: 10px;
+                padding: 8px 10px;
+            }}
+            QLabel#askFrom {{
+                color: {c['sub_deep']}; font-size: 11px;
+                padding: 0 2px 2px;
+            }}
+            QFrame#askOption {{
+                background: {c['surface']}; border: 1px solid {c['border']}; border-radius: 16px;
+            }}
+            QLabel#askChoice {{
+                color: {c['ink']}; font-size: 13px; font-weight: 600;
+            }}
+            QLabel#askDescription {{
+                color: {c['sub_deep']}; font-size: 11px; padding: 2px 10px 8px;
+            }}
+            QLabel#askRecommended {{
+                color: {c['pink']}; font-size: 10px; padding: 8px 8px 0 0;
+            }}
+            QLineEdit#askInput {{
+                color: {c['ink']}; background: {c['surface']};
+                border: 1px solid {c['border']}; border-radius: 10px;
+                font-size: 9px; padding: 7px 10px;
+            }}
+            QPushButton#askSkip, QPushButton#askSend {{
+                min-height: 28px; border-radius: 10px; font-size: 11px; font-weight: 600; padding: 0 13px;
+            }}
+            QPushButton#askSkip {{
+                color: {c['accent_deep']}; background: transparent; border: 1px solid {c['border']};
+            }}
+            QPushButton#askSend {{
+                color: {c['accent_text']}; background: {c['accent']}; border: 1px solid {c['accent']};
+            }}
+            QPushButton#askSkip:hover {{ border-color: {c['accent']}; background: {c['surface_alt']}; }}
+            QPushButton#askSend:hover {{ background: {c['accent_deep']}; border-color: {c['accent_deep']}; }}
+            QPushButton#askSkip:disabled, QPushButton#askSend:disabled {{
+                color: {c['sub']}; background: {c['surface_alt']}; border-color: {c['border']};
+            }}
             QPushButton#refreshBtn, QPushButton#renameBtn {{
                 min-height: 28px; min-width: 88px; color: {c['accent_text']}; background: {c['accent']};
                 border: 1px solid {c['accent']}; border-radius: 10px;
@@ -1534,6 +1837,286 @@ class ZhujianMenu(QFrame):
         else:
             self._render_empty()
         self.load_cache_async()
+
+    # ── 提问模式：推荐条让位，作答后恢复原缓存 ──
+    def is_ask_open(self):
+        return self._ask_entry is not None and not self._ask_finished
+
+    @staticmethod
+    def _copy_cache(cache):
+        if not isinstance(cache, dict) or not cache.get("items"):
+            return None
+        return {
+            **cache,
+            "items": [dict(item) for item in cache.get("items") if isinstance(item, dict)],
+        }
+
+    def show_ask(self, ask):
+        ask_id = ask.get("askId") if isinstance(ask, dict) else ""
+        if not ask_id or self._ask_responding or self._ask_finished:
+            return
+        if self._ask_entry:
+            if ask_id == self._ask_entry.get("askId"):
+                # 当前题正在显示或等待失败重试时，不用新题覆盖输入状态；下一轮再处理。
+                return
+            # 新提问（askId 不同）：旧提问可能已被用户折叠，切换显示新提问
+            #（旧提问由服务端 TTL / 隐式跳过兑底，不丢）
+            self._ask_entry = None
+            self._ask_restore_cache = None
+        self._ask_restore_cache = self._copy_cache(self.ball.cached)
+        self._ask_entry = dict(ask)
+        self._ask_finished = False
+        self._ask_responding = False
+        self._ask_close_armed = False
+        # 注意：不清理 _collapsed_ask_ids——折叠集合是历史放弃记录，
+        # 新提问（askId 不同）天然不受影响，清理反而会让折叠过的旧题再次弹出。
+        self._needs_reanchor = not self._user_dragged
+        self._set_ask_mode(True)
+        self._render_ask(self._ask_entry)
+        self.ball._ask_emitting = True  # 提问挂起：花朵持续散发花瓣
+        self._ask_pulse_title()
+
+    def _ask_pulse_title(self, rounds=3):
+        """提问弹出时标题颜色脉冲（accent_deep ↔ pink），提醒面板内容已切换成提问。"""
+        c = THEME_COLORS[self.ball.theme_mode]
+        step_ms = 170
+        for i in range(rounds * 2):
+            on = i % 2 == 0
+            QTimer.singleShot(
+                i * step_ms,
+                lambda on=on: self.lbl_head.setStyleSheet(f"color: {c['pink']};" if on else ""),
+            )
+
+    def _ask_warn_close(self):
+        """确认式折叠：第一次点球时闪烁提醒，不折叠；提示文字短暂显示后自动消失。"""
+        c = THEME_COLORS[self.ball.theme_mode]
+        step_ms = 130
+        for i in range(4):
+            on = i % 2 == 0
+            QTimer.singleShot(
+                i * step_ms,
+                lambda on=on: self.lbl_head.setStyleSheet(f"color: {c['pink']};" if on else ""),
+            )
+        self._flash("还有问题没答哦，再点一次才收起")
+        QTimer.singleShot(2200, lambda: self._flash("") if self._ask_entry else None)
+
+    def _set_ask_mode(self, active):
+        if active:
+            entry = self._ask_entry or {}
+            self.lbl_head.setText("❓ " + (entry.get("header") or "请你拍板"))
+            self.setMinimumHeight(0)  # 清掉上一轮 settle 残留的最小高度
+            for widget in (
+                self.lbl_target_label, self.btn_target, self.lbl_target_info,
+                self.btn_refresh, self.lbl_cache_time, self.lbl_section,
+                self.btn_rename, self.btn_undo, self.lbl_rename_hint, self.lbl_hint,
+            ):
+                widget.hide()
+            self.target_menu.hide()
+            self.ask_scroll.show()
+            self.ask_input.show()
+            self.btn_ask_skip.show()
+            self.btn_ask_send.show()
+            screen = self.ball.screen() or QApplication.primaryScreen()
+            geo = screen.availableGeometry() if screen else None
+            max_height = ASK_PANEL_MAX_HEIGHT
+            if geo is not None:
+                max_height = min(max_height, max(280, int(geo.height() * 0.60)))
+            self.setMaximumHeight(max_height)
+            self.ask_scroll.setMinimumHeight(min(180, max_height - 124))
+            self.ask_scroll.setMaximumHeight(max(120, max_height - 124))
+            self._set_ask_controls_enabled(not self._ask_responding and not self._ask_finished)
+            # QScrollArea 的 sizeHint 不反映内容高度，直接 adjustSize 会让窗口停在小高度，
+            # 长内容时选项被压在折叠区。等两轮布局稳定后按内容真实高度撑起面板。
+            QTimer.singleShot(0, lambda: QTimer.singleShot(0, self._settle_ask_height))
+        else:
+            self.setMaximumHeight(16777215)
+            self.setMinimumHeight(0)
+            self.lbl_head.setText("解语花")
+            for widget in (
+                self.lbl_target_label, self.btn_target, self.lbl_target_info,
+                self.btn_refresh, self.lbl_cache_time, self.lbl_section,
+                self.btn_rename, self.btn_undo, self.lbl_rename_hint, self.lbl_hint,
+            ):
+                widget.show()
+            self.ask_scroll.hide()
+            self.ask_input.hide()
+            self.btn_ask_skip.hide()
+            self.btn_ask_send.hide()
+            self._set_ask_controls_enabled(False)
+
+    def _settle_ask_height(self):
+        """提问态布局稳定后，按内容真实高度调整面板高度：
+        内容少时面板紧凑（不小于 180 滚动区），内容多时封顶 max_height 内部滚动。"""
+        if not self.is_ask_open() or self._ask_responding or self._ask_finished:
+            return
+        max_height = self.maximumHeight()
+        if max_height <= 0 or max_height >= 16777215:
+            return
+        body = self.ask_scroll.widget()
+        if body is None:
+            return
+        body_layout = body.layout()
+        if body_layout is not None:
+            body_layout.activate()
+        content_h = body.sizeHint().height()
+        fixed_h = 160  # 标题 + 输入框 + 按钮 + feedback + 边距 + 间距（近似）
+        # 下限 440：内容少时面板也要舒展（手帐风低信息密度），内容多再往上长
+        target = min(max_height, max(440, fixed_h + max(180, content_h)))
+        if target <= 0 or target == self.height():
+            return
+        # 用 setFixedHeight 锁死：move_to_ball 里的 adjustSize 不会把高度压回
+        #（QScrollArea 的 sizeHint 是默认小值，直接 resize 会被 adjustSize 覆盖）
+        self.setFixedHeight(target)
+        self.move_to_ball()
+
+    def _clear_ask_options(self):
+        while self.ask_options_grid.count():
+            item = self.ask_options_grid.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.hide()
+                widget.deleteLater()
+        self._ask_option_frames = []
+
+    def _render_ask(self, ask):
+        self._clear_buttons()
+        self._clear_ask_options()
+        title = str(ask.get("sessionTitle") or "").strip()
+        agent = str(ask.get("agentName") or "").strip()
+        if title:
+            self.lbl_ask_from.setText(f"💬 来自窗口：{title}")
+            self.lbl_ask_from.show()
+        elif agent:
+            self.lbl_ask_from.setText(f"💬 来自：{agent}")
+            self.lbl_ask_from.show()
+        else:
+            self.lbl_ask_from.hide()
+        self.lbl_ask_question.setText(str(ask.get("question") or ""))
+        options = ask.get("options") if isinstance(ask.get("options"), list) else []
+        # 选项永远 1 列竖排：每个选项一个整行横条胶囊（跟普通推荐条同款排法）
+        for index, option in enumerate(options):
+            if not isinstance(option, dict):
+                continue
+            original_label = str(option.get("label") or "").strip()
+            if not original_label:
+                continue
+            recommended = original_label.endswith("(Recommended)")
+            display_label = original_label[:-len("(Recommended)")].rstrip() if recommended else original_label
+            frame = AskOptionFrame(
+                display_label or original_label,
+                str(option.get("description") or "").strip(),
+                recommended,
+            )
+            frame.choice_label.clicked.connect(
+                lambda label=original_label: self._respond_ask("option", label)
+            )
+            self.ask_options_grid.addWidget(frame, index, 0)
+            self._ask_option_frames.append(frame)
+        self.ask_input.clear()
+        self.lbl_feedback.setText("")
+        self._set_ask_controls_enabled(not self._ask_responding and not self._ask_finished)
+        self._sync_size()
+        self.keep_current_position(full_height=True)
+
+    def _set_ask_controls_enabled(self, enabled):
+        for frame in self._ask_option_frames:
+            frame.choice_label.setEnabled(bool(enabled))
+        self.ask_input.setEnabled(bool(enabled))
+        self.btn_ask_skip.setEnabled(bool(enabled))
+        self.btn_ask_send.setEnabled(bool(enabled))
+
+    def _send_custom_ask(self):
+        value = normalize_custom_answer(self.ask_input.text())
+        if not value:
+            self._flash("请选择一个选项或填写自定义答案")
+            return
+        self._respond_ask("custom", value)
+
+    def _respond_ask(self, mode, choice):
+        if not self._ask_entry or self._ask_responding or self._ask_finished:
+            return
+        ask_id = self._ask_entry.get("askId") or ""
+        self._ask_responding = True
+        self._ask_response_mode = mode
+        self._ask_response_choice = choice
+        self._set_ask_controls_enabled(False)
+        self._flash("正在发送…")
+
+        def worker():
+            payload = {
+                "askId": ask_id,
+                "mode": mode,
+                "choice": choice,
+                "ok": False,
+                "error": "连不上解语花，看看插件开着没",
+            }
+            try:
+                data = api_post("/ask/respond", {
+                    "askId": ask_id,
+                    "mode": mode,
+                    "choice": choice,
+                }, timeout=20)
+                payload.update(data or {})
+                payload["askId"] = ask_id
+            except urllib.error.HTTPError as e:
+                try:
+                    body = json.loads(e.read().decode("utf-8"))
+                    payload["error"] = body.get("error") or f"出错了 ({e.code})"
+                except Exception:
+                    payload["error"] = f"出错了 ({e.code})"
+            except Exception:
+                pass
+            try:
+                self.ask_response_ready.emit(payload)
+            except RuntimeError:
+                pass
+
+        threading.Thread(target=worker, daemon=True, name="zhujian-ask-response").start()
+
+    def _apply_ask_response(self, payload):
+        if not self._ask_entry or payload.get("askId") != self._ask_entry.get("askId"):
+            return
+        self._ask_responding = False
+        if payload.get("ok"):
+            self._ask_finished = True
+            mode = payload.get("mode") or self._ask_response_mode
+            choice = payload.get("choice") or self._ask_response_choice
+            self._flash("已跳过" if mode == "skip" else f"已发送 · {choice}")
+            self._set_ask_controls_enabled(False)
+            completed_ask_id = self._ask_entry.get("askId")
+            QTimer.singleShot(
+                650,
+                lambda ask_id=completed_ask_id: self.restore_recommendations(ask_id),
+            )
+        else:
+            self._set_ask_controls_enabled(True)
+            self._flash(payload.get("error") or "发送失败，再试一次")
+
+    def restore_recommendations(self, expected_ask_id=None):
+        if not self._ask_entry or self._ask_responding:
+            return
+        if expected_ask_id and self._ask_entry.get("askId") != expected_ask_id:
+            return
+        cache = self._ask_restore_cache or self._copy_cache(self.ball.cached)
+        self._ask_entry = None
+        self._ask_restore_cache = None
+        self._ask_finished = False
+        self._ask_response_mode = ""
+        self._ask_response_choice = ""
+        self._needs_reanchor = False
+        # 注意：不清理 _collapsed_ask_ids——折叠场景调 restore 时
+        # 折叠集合是“服务端作废失败”的本地兜底，清理会让折叠失效（关了又弹）
+        self._ask_close_armed = False
+        self.ball._ask_emitting = False  # 弹窗关闭，停止散发花瓣
+        self._set_ask_mode(False)
+        if cache and cache.get("items"):
+            self.ball.cached = cache
+            self._render_items(cache["items"])
+        else:
+            self._render_empty()
+        self._flash("")
+        self._sync_size()
+        self.keep_current_position()
 
     def load_cache_async(self):
         def worker():
@@ -1606,7 +2189,8 @@ class ZhujianMenu(QFrame):
         if payload.get("items"):
             ts = payload.get("ts") or (int(time.time() * 1000) if not payload.get("fromCache") else (self.ball.cached or {}).get("ts") or 0)
             self.ball.cached = {"items": payload["items"], "rid": payload["rid"], "ts": ts}
-            self._render_items(payload["items"])
+            if self._ask_entry is None:
+                self._render_items(payload["items"])
         elif payload.get("error"):
             self._render_error(payload["error"])
 
@@ -1916,12 +2500,19 @@ class ZhujianMenu(QFrame):
             # 内容未就绪（空/加载中）：先贴到花朵旁边，等 full_height 时正式锚定
             self.move_to_ball()
             return
-        self._sync_size()
+        # 内容已就绪且已锚定过：尺寸同步延迟到布局稳定（两轮事件循环）后再 adjustSize。
+        # 换行 QLabel 的 sizeHint 在宽度分配后两轮才正确，立即 adjustSize 会拿到
+        # 未换行的错误高度，把推荐条压扁/撑爆（图1 错位残字的根因）。
+        self._schedule_size_sync()
         screen = self.ball.screen() or QApplication.primaryScreen()
         geo = screen.availableGeometry()
         x = max(geo.left(), min(self.x(), geo.right() - self.width() + 1))
         y = max(geo.top(), min(self.y(), geo.bottom() - self.height() + 1))
         self.move(x, y)
+
+    def _schedule_size_sync(self):
+        """延迟到布局稳定（两轮事件循环）后再 adjustSize。"""
+        QTimer.singleShot(0, lambda: QTimer.singleShot(0, self._sync_size))
 
     def _reanchor_once(self):
         """延迟锚定：等布局稳定后按花朵重新定位（用于内容就绪后的首次锚定）。"""

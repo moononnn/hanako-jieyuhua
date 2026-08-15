@@ -14,7 +14,7 @@ import path from "node:path";
 const home = fs.mkdtempSync(path.join(os.tmpdir(), "jiegehua-sess-test-"));
 process.env.HANA_HOME = home;
 
-const { extractConversationMessage, buildContextText, findMostActiveSession } = await import("../lib/session.js");
+const { extractConversationMessage, buildContextText, findMostActiveSession, lastUserMessageTs } = await import("../lib/session.js");
 
 // 构造一条带超长 hana_reference 注入的用户消息（模拟 Hana 实际注入，工具清单 > 旧截断 500）
 function longRefMessage(userText) {
@@ -92,4 +92,26 @@ test("findMostActiveSession 多 agent 间也按用户消息时间选", () => {
   const result = findMostActiveSession();
   assert.equal(result.agentId, "yumi");
   assert.equal(result.sessionPath, fpC);
+});
+
+// ═══ 隐式跳过判定：提问归属会话的最后用户消息时间 ═══
+
+test("lastUserMessageTs 兼容 ISO 字符串与数字两种时间戳格式", () => {
+  const iso = Date.parse("2026-08-11T10:00:00.000Z");
+  const fp = writeSession("hanako", "2026-08-11T00-00-00-000Z_sess-ts.jsonl", [
+    JSON.stringify({ type: "message", timestamp: "2026-08-11T09:00:00.000Z", message: { role: "user", content: [{ type: "text", text: "早消息" }] } }),
+    JSON.stringify({ role: "assistant", content: "回复" }),
+    JSON.stringify({ role: "user", ts: iso, content: "旧格式新消息" }),
+  ]);
+  assert.equal(lastUserMessageTs(fp), iso, "数字 ts 旧格式应原样返回");
+});
+
+test("lastUserMessageTs 忽略 assistant 消息与空内容，文件不存在返回 0", () => {
+  const fp = writeSession("hanako", "2026-08-11T00-00-00-000Z_sess-ts2.jsonl", [
+    JSON.stringify({ type: "message", timestamp: "2026-08-11T08:00:00.000Z", message: { role: "user", content: [{ type: "text", text: "唯一用户消息" }] } }),
+    JSON.stringify({ type: "message", timestamp: "2026-08-11T09:00:00.000Z", message: { role: "assistant", content: [{ type: "text", text: "助手回复" }] } }),
+    JSON.stringify({ type: "message", timestamp: "2026-08-11T10:00:00.000Z", message: { role: "user", content: [] } }),
+  ]);
+  assert.equal(lastUserMessageTs(fp), Date.parse("2026-08-11T08:00:00.000Z"), "应跳过空内容用户消息，取上一条有效用户消息");
+  assert.equal(lastUserMessageTs(path.join(home, "no-such-file.jsonl")), 0);
 });

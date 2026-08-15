@@ -14,6 +14,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { listAskPending, queueAskSkip } from "../lib/data.js";
+import { lastUserMessageTs } from "../lib/session.js";
 
 const HANA_HOME = process.env.HANA_HOME || path.join(os.homedir(), ".hanako");
 const DATA_DIR = path.join(HANA_HOME, "plugin-data", "jiegehua");
@@ -88,11 +90,61 @@ function inject(event, cfg) {
   return true;
 }
 
+// ── 隐式跳过：用户无视提问面板、直接在对话框继续交流时自动跳过 ──
+// 判断依据：存在未作答提问，且当前这轮不是弹窗作答触发的回合
+//（作答回合的消息里带「# 提问卡片」回传）。登记到跳过队列后，
+// 代理在悬浮球轮询时回传「跳过，不做选择」并收起弹窗。
+const recentAskSkips = new Map(); // askId -> ts
+const ASK_SKIP_DEBOUNCE_MS = 60_000;
+
+function messagesContainAskCard(messages) {
+  if (!Array.isArray(messages)) return false;
+  for (const msg of messages) {
+    const content = msg?.content;
+    if (typeof content === "string" && content.includes("# 提问卡片")) return true;
+    if (Array.isArray(content)) {
+      for (const part of content) {
+        if (part && typeof part === "object" && typeof part.text === "string" && part.text.includes("# 提问卡片")) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+async function handleAskAutoSkip(event) {
+  try {
+    if (messagesContainAskCard(event?.messages)) return; // 这轮就是弹窗作答，不动
+    const pending = listAskPending(DATA_DIR);
+    if (!pending.length) return;
+    const now = Date.now();
+    for (const entry of pending) {
+      const askId = entry.askId;
+      if (!askId || !entry.sessionPath) continue;
+      // 只看提问归属会话本身：用户是否在提问窗口里发了新消息（晚于提问创建）。
+      // 用户在别的窗口忙不会误判；提问窗口有新的用户消息才算无视。
+      const lastUserTs = lastUserMessageTs(entry.sessionPath);
+      if (!lastUserTs || lastUserTs <= (entry.ts || 0)) continue;
+      const last = recentAskSkips.get(askId);
+      if (last && now - last < ASK_SKIP_DEBOUNCE_MS) continue;
+      recentAskSkips.set(askId, now);
+      await queueAskSkip(DATA_DIR, askId);
+      appendLog(`[ask] 提问会话出现新用户消息（${lastUserTs} > ${entry.ts}），隐式跳过: ${askId}`);
+    }
+  } catch (e) {
+    appendLog(`[ask] 隐式跳过检测出错: ${e?.message || e}`);
+  }
+}
+
 export default function (pi) {
   appendLog("[启动] 解语花注入扩展加载（context 事件模式）");
 
   pi.on("context", async (event) => {
     try {
+      // 隐式跳过检测独立于注入：悬浮球模式（presentation=ball）下也生效
+      await handleAskAutoSkip(event);
+
       const cfg = readConfig();
       if (cfg.presentation !== "card") {
         appendLog(`[context] 已跳过（presentation=${cfg.presentation}）`);
