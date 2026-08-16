@@ -62,6 +62,31 @@ const AUTO_NUDGE = "\n\n💡 如果你觉得这轮回复后用户可能还想继
 const ALWAYS_SYSTEM = "（解语花）写正文之前，先调用 suggest_replies 工具生成推荐回复，然后再写正文。";
 const AUTO_SYSTEM = "（解语花）如果这轮回复后用户可能还想继续聊：写正文之前，先调用 suggest_replies 工具。";
 
+// ── ask 引导（悬浮球模式专用） ──
+// ball 模式下不注入 suggest_replies（悬浮球自己管推荐区），但 ask_user_choice
+// 没有别的提示通道：工具描述只在工具列表里，flash 模型在长工具列表里容易漏
+//（2026-08-16 实测实锤：其他助手会话需要拍板却纯文本提问，弹窗没出现）。
+// 这里注入一条条件式引导，让所有助手的会话（不只小花）需要拍板时都能想起调用它。
+const ASK_NUDGE = "\n\n💡 如果这轮需要用户拍板、做选择或确认方向：写正文之前，先调用 ask_user_choice 工具，把问题和选项传进去（悬浮球会弹出提问面板）。";
+const ASK_SYSTEM = "（解语花）如果这轮需要用户拍板或选择：写正文前先调用 ask_user_choice 工具，让悬浮球弹出提问面板。";
+
+function injectAsk(event) {
+  if (!Array.isArray(event?.messages)) return false;
+  event.messages.push({ role: "system", content: ASK_SYSTEM });
+  let lastUserIdx = -1;
+  for (let i = event.messages.length - 1; i >= 0; i--) {
+    if (event.messages[i]?.role === "user") { lastUserIdx = i; break; }
+  }
+  if (lastUserIdx === -1) return false;
+  const userMsg = event.messages[lastUserIdx];
+  if (typeof userMsg.content === "string") {
+    userMsg.content += ASK_NUDGE;
+  } else if (Array.isArray(userMsg.content)) {
+    userMsg.content.push({ type: "text", text: ASK_NUDGE });
+  }
+  return true;
+}
+
 function inject(event, cfg) {
   const isAlways = cfg.mode === "always";
   const nudge = isAlways ? ALWAYS_NUDGE : AUTO_NUDGE;
@@ -146,6 +171,18 @@ export default function (pi) {
       await handleAskAutoSkip(event);
 
       const cfg = readConfig();
+      if (cfg.presentation === "ball") {
+        // 悬浮球模式：不注入推荐引导（悬浮球自己管），但注入拍板引导，
+        // 否则其他助手的会话里没有任何提示通道，flash 模型想不起 ask 工具。
+        const msgCount = event?.messages?.length || 0;
+        if (msgCount === 0) return;
+        if (injectAsk(event)) {
+          appendLog(`[context] ✅ 已注入 ask 引导（ball）`);
+          return { messages: event.messages };
+        }
+        appendLog("[context] 注入失败（没找到可注入的位置）");
+        return;
+      }
       if (cfg.presentation !== "card") {
         appendLog(`[context] 已跳过（presentation=${cfg.presentation}）`);
         return;
