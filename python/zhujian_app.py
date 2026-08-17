@@ -34,7 +34,7 @@ import threading
 import urllib.request
 import urllib.error
 
-from PyQt6.QtCore import Qt, QTimer, QPoint, QPointF, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, QPoint, QPointF, pyqtSignal, QPropertyAnimation, QEvent
 from PyQt6.QtGui import (
     QPixmap, QPainter, QColor, QFontMetrics, QCursor, QPalette,
 )
@@ -178,6 +178,13 @@ TARGET_SESSION_LIMIT = 5    # 目标选择只展示最近活跃的 5 个窗口�
 ASK_INPUT_MAX_LENGTH = 200  # 自定义回答上限，和服务端校验保持一致
 ASK_POLL_INTERVAL_MS = 1500
 ASK_PANEL_MAX_HEIGHT = 600
+
+# ── 弹窗鼠标离开自动半透明（左键面板 / 右键浮签共用） ──
+FADE_OUT_OPACITY = 0.60      # 半透明下限：留存在感，鼠标也找得到窗口
+FADE_OUT_DELAY_MS = 450      # 鼠标离开后的宽限，防止快速穿越边缘抖动
+FADE_SHOW_GRACE_MS = 900     # 刚弹出时的缓冲：即使光标不在窗内也先全显，再开始判定
+FADE_OUT_DURATION_MS = 420   # 淡出渐变时长（慢慢隐退）
+FADE_IN_DURATION_MS = 180    # 恢复渐变时长（回来要快）
 
 # ── 手帐风配色：保留落樱自己的薄荷绿与粉色，明暗随 Hana 切换 ──
 DARK_THEME_IDS = {"midnight", "midnight-contrast"}
@@ -474,16 +481,74 @@ def save_state(state):
 
 
 # ─────────────────────────────
+#  弹窗鼠标离开自动半透明（mixin，不依赖 MRO，事件由子类显式调用）
+# ─────────────────────────────
+class FadeOnLeaveMixin:
+    """鼠标离开弹窗 → 稍候缓慢半透明；鼠标移回 → 快速恢复不透明。
+
+    弹窗是矩形窗口，enter/leave 事件可靠；但呼出时光标可能就不在窗内
+    （点击花朵后鼠标停在旁边），没有离开事件可依，故 show 时主动检查一次。
+    用法：子类 __init__ 末尾调 setup_fade_on_leave()，并在对应事件里调
+    _reset_fade_on_show / _on_fade_enter / _on_fade_leave。
+    """
+
+    def setup_fade_on_leave(self):
+        self._fade_out_timer = QTimer(self)
+        self._fade_out_timer.setSingleShot(True)
+        self._fade_out_timer.timeout.connect(self._begin_fade_out)
+        self._fade_anim = QPropertyAnimation(self, b"windowOpacity", self)
+
+    def _fade_allowed(self):
+        """是否允许自动淡出；子类可覆写（如提问态保持实体）。"""
+        return True
+
+    def _reset_fade_on_show(self):
+        """显示时：光标在窗内 → 全不透明且不排期；不在 → 给缓冲期后淡出。"""
+        self.setWindowOpacity(1.0)
+        self._fade_out_timer.stop()
+        self._fade_anim.stop()
+        if self._fade_allowed() and not self._cursor_inside():
+            self._fade_out_timer.start(FADE_OUT_DELAY_MS + FADE_SHOW_GRACE_MS)
+
+    def _on_fade_enter(self):
+        self._fade_out_timer.stop()
+        self._fade_to(1.0, FADE_IN_DURATION_MS)
+
+    def _on_fade_leave(self):
+        if self._fade_allowed():
+            self._fade_out_timer.start(FADE_OUT_DELAY_MS)
+
+    def _cancel_fade(self):
+        if self._fade_out_timer is not None:
+            self._fade_out_timer.stop()
+        if self._fade_anim is not None:
+            self._fade_anim.stop()
+
+    def _cursor_inside(self):
+        return self.rect().contains(self.mapFromGlobal(QCursor.pos()))
+
+    def _begin_fade_out(self):
+        self._fade_to(FADE_OUT_OPACITY, FADE_OUT_DURATION_MS)
+
+    def _fade_to(self, target, duration_ms):
+        self._fade_anim.stop()
+        self._fade_anim.setStartValue(self.windowOpacity())
+        self._fade_anim.setEndValue(target)
+        self._fade_anim.setDuration(duration_ms)
+        self._fade_anim.start()
+
+
+# ─────────────────────────────
 #  发送方式浮签（替代粗糙的系统 QMenu）
 # ─────────────────────────────
-class SendModeMenu(QFrame):
+class SendModeMenu(FadeOnLeaveMixin, QFrame):
     def __init__(self, ball):
         super().__init__(None)
         self.ball = ball
         self.setWindowFlags(
-            Qt.WindowType.Popup
-            | Qt.WindowType.FramelessWindowHint
+            Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
             | Qt.WindowType.NoDropShadowWindowHint
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -525,6 +590,23 @@ class SendModeMenu(QFrame):
         btn_close.clicked.connect(self._quit_ball)
         root.addWidget(btn_close)
         self.apply_theme()
+        self.setup_fade_on_leave()
+
+    def enterEvent(self, event):
+        super().enterEvent(event)
+        self._on_fade_enter()
+
+    def leaveEvent(self, event):
+        super().leaveEvent(event)
+        self._on_fade_leave()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._reset_fade_on_show()
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self._cancel_fade()
 
     def apply_theme(self):
         c = THEME_COLORS[self.ball.theme_mode]
@@ -925,6 +1007,9 @@ class ZhujianBall(QWidget):
         self.menu = None
         self._ask_poll_inflight = False
         self.ask_ready.connect(self._apply_ask_payload)
+        # 右键浮签不再是 Popup（Popup 会抢在 toggle 前自动关闭，无法实现"再按一次右键收起"），
+        # 由这里统一接管「点击外部关闭」：监听所有窗口的鼠标按下
+        QApplication.instance().installEventFilter(self)
 
         self.ask_poll_timer = QTimer(self)
         self.ask_poll_timer.timeout.connect(self._poll_ask_async)
@@ -976,6 +1061,9 @@ class ZhujianBall(QWidget):
                 return
             if not self.menu.isVisible():
                 # 已经在提问态时只重新显示原面板，不能先 prepare_for_show 把提问替换成推荐。
+                # 互斥：自动弹面板前也先收右键浮签，保证两窗不并存
+                if self.context_menu is not None:
+                    self.context_menu.close()
                 if not self.menu.is_ask_open():
                     self.menu.prepare_for_show()
                 self.menu.move_to_ball()
@@ -1433,8 +1521,15 @@ class ZhujianBall(QWidget):
             self._press_global = None
             self._drag_menu_was_visible = False
         elif e.button() == Qt.MouseButton.RightButton:
-            self._open_context_menu(e.globalPosition().toPoint())
+            self._toggle_context_menu(e.globalPosition().toPoint())
         e.accept()
+
+    def _toggle_context_menu(self, global_pos):
+        # 单击右键展开 / 再次右键收起（与左键面板一致）
+        if self.context_menu is not None and self.context_menu.isVisible():
+            self.context_menu.close()
+        else:
+            self._open_context_menu(global_pos)
 
     def _sync_dragged_menu(self):
         if not self._drag_menu_was_visible or self.menu is None:
@@ -1496,9 +1591,30 @@ class ZhujianBall(QWidget):
 
     # ── 右键菜单 ──
     def _open_context_menu(self, global_pos):
+        # 互斥：开右键浮签前先收左键面板，两个弹窗永不并存（避免叠放/遮挡干扰 hover）
+        self._close_menu()
         if self.context_menu is None:
             self.context_menu = SendModeMenu(self)
         self.context_menu.show_at(global_pos)
+
+    def eventFilter(self, obj, event):
+        # 右键浮签开着时，任何窗口上的鼠标按下都先过这里：
+        # 按在浮签内 → 放行；按在浮签外 → 关闭（点空白/点别的窗口都算）
+        if event.type() == QEvent.Type.MouseButtonPress:
+            self._dismiss_context_menu_on_outside_click(event)
+        return super().eventFilter(obj, event)
+
+    def _dismiss_context_menu_on_outside_click(self, event):
+        menu = self.context_menu
+        if menu is None or not menu.isVisible():
+            return
+        pos = event.globalPosition().toPoint()
+        if menu.geometry().contains(pos):
+            return
+        # 右键点在花朵上：不在这里关，交给花朵的右键 toggle（保持"再按一次右键收起"）
+        if event.button() == Qt.MouseButton.RightButton and self.geometry().contains(pos):
+            return
+        menu.close()
 
     def _set_action(self, action):
         self.action = action
@@ -1527,7 +1643,7 @@ class ZhujianBall(QWidget):
 # ─────────────────────────────
 #  推荐面板（未变动，沿用）
 # ─────────────────────────────
-class ZhujianMenu(QFrame):
+class ZhujianMenu(FadeOnLeaveMixin, QFrame):
     refresh_ready = pyqtSignal(object)
     target_ready = pyqtSignal(object)
     rename_ready = pyqtSignal(object)
@@ -1578,6 +1694,7 @@ class ZhujianMenu(QFrame):
         self.undo_ready.connect(self._apply_undo_result)
         self.ask_response_ready.connect(self._apply_ask_response)
         self._build_ui()
+        self.setup_fade_on_leave()
 
     def _build_ui(self):
         root = QVBoxLayout(self)
@@ -1842,6 +1959,10 @@ class ZhujianMenu(QFrame):
     def is_ask_open(self):
         return self._ask_entry is not None and not self._ask_finished
 
+    def _fade_allowed(self):
+        # 提问态保持实体：读题/作答是强互动，不参与鼠标离开淡出
+        return not self.is_ask_open()
+
     @staticmethod
     def _copy_cache(cache):
         if not isinstance(cache, dict) or not cache.get("items"):
@@ -1865,6 +1986,9 @@ class ZhujianMenu(QFrame):
             self._ask_restore_cache = None
         self._ask_restore_cache = self._copy_cache(self.ball.cached)
         self._ask_entry = dict(ask)
+        # 提问态保持实体：若此前已淡出/正在淡出，立即拉回全不透明并取消排期
+        self.setWindowOpacity(1.0)
+        self._cancel_fade()
         self._ask_finished = False
         self._ask_responding = False
         self._ask_close_armed = False
@@ -2577,9 +2701,19 @@ class ZhujianMenu(QFrame):
     def showEvent(self, event):
         super().showEvent(event)
         self.activateWindow()
+        self._reset_fade_on_show()
 
     def hideEvent(self, event):
         super().hideEvent(event)
+        self._cancel_fade()
+
+    def enterEvent(self, event):
+        super().enterEvent(event)
+        self._on_fade_enter()
+
+    def leaveEvent(self, event):
+        super().leaveEvent(event)
+        self._on_fade_leave()
 
     # ── 面板拖拽：按住空白处时，展板与花朵保持原距离一起移动 ──
     def mousePressEvent(self, e):
