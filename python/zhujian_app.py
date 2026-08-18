@@ -1074,7 +1074,8 @@ class ZhujianBall(QWidget):
             self.menu.raise_()
             return
         if self.menu is not None and self.menu.is_ask_open():
-            self.menu.restore_recommendations()
+            # ask 消失（作答完成/隐式跳过/过期）后不弹推荐，直接收起面板回悬浮球
+            self.menu.finish_ask_and_collapse()
 
     def _sync_theme(self):
         mode = read_hana_theme_mode()
@@ -2208,9 +2209,10 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
             self._flash("已跳过" if mode == "skip" else f"已发送 · {choice}")
             self._set_ask_controls_enabled(False)
             completed_ask_id = self._ask_entry.get("askId")
+            # 作答完成不恢复推荐面板，短暂反馈后直接收起成悬浮球
             QTimer.singleShot(
                 650,
-                lambda ask_id=completed_ask_id: self.restore_recommendations(ask_id),
+                lambda ask_id=completed_ask_id: self.finish_ask_and_collapse(ask_id),
             )
         else:
             self._set_ask_controls_enabled(True)
@@ -2241,6 +2243,27 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
         self._flash("")
         self._sync_size()
         self.keep_current_position()
+
+    def finish_ask_and_collapse(self, expected_ask_id=None):
+        """提问作答完成 / ask 判定可关闭（隐式跳过、过期等）后：清理提问态并收起面板回悬浮球。
+
+        用户已通过面板作答或直接在主对话继续，不需要再弹推荐面板；
+        恢复推荐交给下次手动打开面板时 prepare_for_show 重新渲染。"""
+        if not self._ask_entry or self._ask_responding:
+            return
+        if expected_ask_id and self._ask_entry.get("askId") != expected_ask_id:
+            return
+        self._ask_entry = None
+        self._ask_restore_cache = None
+        self._ask_finished = False
+        self._ask_response_mode = ""
+        self._ask_response_choice = ""
+        self._needs_reanchor = False
+        self._ask_close_armed = False
+        self.ball._ask_emitting = False  # 提问结束，停止散发花瓣
+        self._set_ask_mode(False)
+        self._flash("")
+        self.close_menu()
 
     def load_cache_async(self):
         def worker():
