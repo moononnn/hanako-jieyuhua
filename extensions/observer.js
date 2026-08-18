@@ -123,8 +123,11 @@ const recentAskSkips = new Map(); // askId -> ts
 const ASK_SKIP_DEBOUNCE_MS = 60_000;
 
 function messagesContainAskCard(messages) {
-  if (!Array.isArray(messages)) return false;
-  for (const msg of messages) {
+  if (!Array.isArray(messages) || messages.length === 0) return false;
+  // 弹窗作答回传（deferred resolve 注入）一定是最新追加的消息，只检查末尾最近 2 条。
+  // 扫全量历史会让任意历史消息里的「# 提问卡片」字样（如工具结果里的源码、助手正文）
+  // 把每一轮 context 都误判成「作答回合」，隐式跳过检测被永久短路（2026-08-18 实机踩坑）。
+  for (const msg of messages.slice(-2)) {
     const content = msg?.content;
     if (typeof content === "string" && content.includes("# 提问卡片")) return true;
     if (Array.isArray(content)) {
