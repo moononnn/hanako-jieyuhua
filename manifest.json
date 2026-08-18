@@ -1,9 +1,9 @@
-﻿{
+{
   "manifestVersion": 1,
   "id": "jiegehua",
-  "name": "瑙ｈ鑺?,
+  "name": "解语花",
   "version": "1.0.3",
-  "description": "灏忚姳鍥炲瀹屼箣鍚庯紝甯綘鐢熸垚鍑犳潯鎺ㄨ崘鍥炲锛岀偣涓€涓嬪氨鑳芥帴涓婅瘽銆傚彲閫夊洖澶嶅崱鐗囨垨妗岄潰瑙ｈ鑺辨偓娴悆锛堜竴鏈典細鎺ヨ瘽鐨勬ū鑺憋級銆?,
+  "description": "小花回复完之后，帮你生成几条推荐回复，点一下就能接上话。可选回复卡片或桌面解语花悬浮球（一朵会接话的樱花）。",
   "minAppVersion": "0.159.0",
   "trust": "full-access",
   "install": {
@@ -21,7 +21,7 @@
   },
   "contributes": {
     "page": {
-      "title": "瑙ｈ鑺?,
+      "title": "解语花",
       "route": "/settings",
       "icon": "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><path d='M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z'/><path d='M9 10h6'/><path d='M9 13h4'/></svg>"
     },
@@ -38,4 +38,3 @@
     ]
   }
 }
-
