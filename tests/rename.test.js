@@ -13,7 +13,7 @@ const home = fs.mkdtempSync(path.join(os.tmpdir(), "jiegehua-rename-test-"));
 process.env.HANA_HOME = home;
 
 const { readAllMessages, buildTitleContext } = await import("../lib/session.js");
-const { cleanTitleOutput, buildTitlePrompt, detectConversationLang, summarizeSessionTitle } = await import("../lib/zhujian.js");
+const { cleanTitleOutput, cleanTitleFallbackText, buildTitlePrompt, detectConversationLang, summarizeSessionTitle } = await import("../lib/zhujian.js");
 const { normalizeData, saveData } = await import("../lib/data.js");
 
 function msg(role, text, ts) {
@@ -45,6 +45,23 @@ test("cleanTitleOutput 去掉代码块包裹", () => {
   assert.equal(cleanTitleOutput("```json\n插件开发\n```"), "插件开发");
 });
 
+test("cleanTitleOutput 去掉完整或未闭合的思考链", () => {
+  assert.equal(cleanTitleOutput("<think>内部推理</think>\n「插件开发」"), "插件开发");
+  assert.equal(cleanTitleOutput("[analysis]内部分析[/analysis]\n插件开发"), "插件开发");
+  assert.equal(cleanTitleOutput("<think>只有内部推理，没有可见标题"), null);
+});
+
+test("cleanTitleOutput 兼容嵌套标签与连续思考块", () => {
+  assert.equal(
+    cleanTitleOutput("<think>外层<analysis>内层</analysis>外层</think>\n插件布局优化"),
+    "插件布局优化",
+  );
+  assert.equal(
+    cleanTitleOutput("<think>第一段</think><think>第二段</think>\n插件布局优化"),
+    "插件布局优化",
+  );
+});
+
 test("cleanTitleOutput 超长截断 30 字，空输入返回 null", () => {
   const long = "很".repeat(50);
   assert.equal(cleanTitleOutput(long).length, 30);
@@ -53,6 +70,13 @@ test("cleanTitleOutput 超长截断 30 字，空输入返回 null", () => {
   assert.equal(cleanTitleOutput("。。"), null);
   assert.equal(cleanTitleOutput(123), null);
   assert.equal(cleanTitleOutput(null), null);
+});
+
+test("cleanTitleFallbackText 去掉附件包装，保留用户真正写的文字", () => {
+  const raw = '[SessionFile] {"fileId":"sf_demo","sessionPath":"C:/x.jsonl"}\n[attached_image: C:/x.png]\n把两个界面拆开';
+  assert.equal(cleanTitleFallbackText(raw), "把两个界面拆开");
+  assert.equal(cleanTitleFallbackText('[SessionFile] {"fileId":"sf_demo"}'), null);
+  assert.equal(cleanTitleOutput('[SessionFile] {"fileId":"sf_demo"}'), null);
 });
 
 // ═══ 总结 prompt ═══
@@ -185,6 +209,44 @@ test("summarizeSessionTitle 模型失败时兜底用最近用户消息前 30 字
   assert.equal(result.ok, true);
   assert.equal(result.title, "最近这条消息就是要用来兜底的");
   assert.equal(result.fallback, true);
+});
+
+test("summarizeSessionTitle 模型失败时不把 SessionFile 包装写进标题", async () => {
+  const fp = writeSession("hanako", [
+    msg("assistant", "前面的回复", "2026-08-13T00:01:00.000Z"),
+    msg("user", '[SessionFile] {"fileId":"sf_demo"}\n[attached_image: C:/x.png]\n我想把两个界面拆开', "2026-08-13T00:02:00.000Z"),
+  ]);
+  const dataDir = makeDataDir();
+  const result = await summarizeSessionTitle(dataDir, null, fp);
+  assert.equal(result.ok, true);
+  assert.equal(result.title, "我想把两个界面拆开");
+  assert.equal(result.fallback, true);
+});
+
+test("summarizeSessionTitle 模型返回附件包装时也回退到干净标题", async () => {
+  const fp = writeSession("hanako", [
+    msg("user", "想把提醒卡片做得更宽一点", "2026-08-13T00:00:00.000Z"),
+    msg("assistant", "好的", "2026-08-13T00:01:00.000Z"),
+  ]);
+  const dataDir = makeDataDir();
+  const modelSample = async () => '[SessionFile] {"fileId":"sf_demo"}';
+  const result = await summarizeSessionTitle(dataDir, modelSample, fp);
+  assert.equal(result.ok, true);
+  assert.equal(result.title, "想把提醒卡片做得更宽一点");
+  assert.equal(result.fallback, true);
+});
+
+test("summarizeSessionTitle 模型返回思考链时保留可见标题", async () => {
+  const fp = writeSession("hanako", [
+    msg("user", "想把提醒卡片做得更宽一点", "2026-08-13T00:00:00.000Z"),
+    msg("assistant", "好的", "2026-08-13T00:01:00.000Z"),
+  ]);
+  const dataDir = makeDataDir();
+  const modelSample = async () => "<think>先分析对话主题和用户意图</think>\n提醒卡片布局优化";
+  const result = await summarizeSessionTitle(dataDir, modelSample, fp);
+  assert.equal(result.ok, true);
+  assert.equal(result.title, "提醒卡片布局优化");
+  assert.equal(result.fallback, false);
 });
 
 test("summarizeSessionTitle 模型正常输出时走清洗", async () => {

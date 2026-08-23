@@ -14,7 +14,7 @@ import path from "node:path";
 const home = fs.mkdtempSync(path.join(os.tmpdir(), "jiegehua-sess-test-"));
 process.env.HANA_HOME = home;
 
-const { extractConversationMessage, buildContextText, findMostActiveSession, lastUserMessageTs } = await import("../lib/session.js");
+const { extractConversationMessage, buildContextText, findMostActiveSession, lastUserMessageTs, lastTurnInputEntryId, readAllMessages } = await import("../lib/session.js");
 
 // 构造一条带超长 hana_reference 注入的用户消息（模拟 Hana 实际注入，工具清单 > 旧截断 500）
 function longRefMessage(userText) {
@@ -57,6 +57,17 @@ test("mood 块与注入块同时存在时只留干净对话", () => {
   const ctx = buildContextText([extractConversationMessage(entry)]);
   assert.ok(ctx.includes("正常回复正文内容"));
   assert.ok(!ctx.includes("内心想法"));
+});
+
+test("readAllMessages 超过 4MB 时读取真实文件尾部", () => {
+  const fp = path.join(home, "long-title.jsonl");
+  const filler = JSON.stringify({ type: "toolResult", content: "x".repeat(8192) });
+  const lines = [JSON.stringify({ role: "user", content: "开头消息" })];
+  while (Buffer.byteLength(lines.join("\n")) < 5 * 1024 * 1024) lines.push(filler);
+  lines.push(JSON.stringify({ role: "user", content: "真实文件尾部的最新消息" }));
+  fs.writeFileSync(fp, lines.join("\n"));
+  const messages = readAllMessages(fp);
+  assert.ok(messages.some((message) => message.content === "真实文件尾部的最新消息"));
 });
 
 // ═══ 根因 B：最活跃会话跟随 ═══
@@ -114,4 +125,23 @@ test("lastUserMessageTs 忽略 assistant 消息与空内容，文件不存在返
   ]);
   assert.equal(lastUserMessageTs(fp), Date.parse("2026-08-11T08:00:00.000Z"), "应跳过空内容用户消息，取上一条有效用户消息");
   assert.equal(lastUserMessageTs(path.join(home, "no-such-file.jsonl")), 0);
+});
+
+test("lastTurnInputEntryId 取最近一个已完成助手回合的 user entry id", () => {
+  const fp = writeSession("hanako", "2026-08-11T00-00-00-000Z_sess-fork.jsonl", [
+    JSON.stringify({ type: "message", id: "u-old", message: { role: "user", content: [{ type: "text", text: "旧问题" }] } }),
+    JSON.stringify({ type: "message", id: "a-old", message: { role: "assistant", content: [{ type: "text", text: "旧回答" }] } }),
+    JSON.stringify({ type: "message", id: "u-new", message: { role: "user", content: [{ type: "text", text: "新问题" }] } }),
+    JSON.stringify({ type: "message", id: "custom", message: { role: "assistant", content: [{ type: "text", text: "中间答复" }] } }),
+    JSON.stringify({ type: "message", id: "a-new", message: { role: "assistant", content: [{ type: "text", text: "新回答" }] } }),
+    JSON.stringify({ type: "message", id: "u-pending", message: { role: "user", content: [{ type: "text", text: "还没回答" }] } }),
+  ]);
+  assert.equal(lastTurnInputEntryId(fp), "u-new");
+});
+
+test("lastTurnInputEntryId 不把未完成回合拿去 fork", () => {
+  const fp = writeSession("hanako", "2026-08-11T00-00-00-000Z_sess-fork-pending.jsonl", [
+    JSON.stringify({ type: "message", id: "u-only", message: { role: "user", content: [{ type: "text", text: "还在生成" }] } }),
+  ]);
+  assert.equal(lastTurnInputEntryId(fp), "");
 });

@@ -1,13 +1,24 @@
 // 解语花 — 核心工具：生成推荐回复
-// agent 在回复末尾调用，返回 plugin_card 渲染在回复末尾
-// 推荐文本存 pending，卡片 iframe 通过 r 参数取用
+// agent 在回复末尾调用；工具准备 .card.html，随后由内置 show_card 铸成真正的内联 Interactive Card
+// 推荐文本仍存 pending，卡片点击发送/复制沿用同一条安全数据链路
 
+import fs from "node:fs";
+import path from "node:path";
+import os from "node:os";
 import { getConfig, createPending } from "../lib/data.js";
 import { generateSuggestions, parseSuggestions } from "../lib/llm.js";
 import { readRecentMessages, buildContextText, findLatestSessionPath } from "../lib/session.js";
+import { detectConversationLang } from "../lib/zhujian.js";
+import {
+  buildShowCardInput,
+  buildShowCardInstruction,
+  buildSuggestionCardDocument,
+  buildLegacyCardDetails,
+  supportsInteractiveCard,
+} from "../lib/suggestion-card.js";
 
 export const name = "suggest_replies";
-export const description = "生成推荐回复：根据最近对话，生成几条用户接下来可能会说的话，以可点击的推荐卡片显示。**在写回复正文之前先调用本工具**（推荐卡片会自动显示，正文不需要提及）。对话性回复（闲聊、答疑、陪伴）适合调用；纯任务执行、用户已明确结束的对话不必调用。";
+export const description = "生成推荐回复：根据最近对话，生成几条用户接下来可能会说的话。**请先写完回复正文，再调用本工具；工具返回后必须立即调用内置 show_card，把返回的参数原样传入，且让 show_card 作为最后一步，才能显示真正可点击的内联卡片**（正文不需要提及卡片）。对话性回复（闲聊、答疑、陪伴）适合调用；纯任务执行、用户已明确结束的对话不必调用。";
 export const parameters = {
   type: "object",
   properties: {
@@ -94,11 +105,18 @@ export function buildStyleLines(count, styles, selected) {
 // ─── 推荐 prompt 公共构建（卡片工具与悬浮球共用，2026-08-14 抽出） ───
 // 参数：count=条数，styles=方向配置，selected=按条数勾选索引，contextText=对话上下文，hint=额外要求（可选）
 // 新条款：① 模仿用户说话风格（含风险闸：不为了模仿而把话说没）② 语言跟随对话
+// 语言跟随与标题同款：由规则锁定后写进 prompt（让模型执行而不是判断，确定性更高），
+// 避免模型自己判断语言时误判/抽风输出英文。
 // 注意：编号顺序与 buildStyleLines 自带的「4.」保持衔接，改这里时留意
 export function buildSuggestionPrompt({ count, styles, selected, contextText, hint }) {
   const sel = (selected && selected[count]) || undefined;
   const styleLines = buildStyleLines(count, styles, sel);
   const hintLine = hint ? `\n额外要求：${hint}` : "";
+  const lang = detectConversationLang(contextText);
+  const langLine =
+    lang === "en"
+      ? "6. 这次对话主要是英文，推荐语必须全部用英文输出，不要用中文"
+      : "6. 这次对话主要是中文，推荐语必须全部用中文输出，不要用英文";
   return [
     "【红线】所有输出必须是「用户」在对话中对「助手」说的话。第一人称「我」、直接对助手喊，不要生成助手口吻、引导问句、旁观者描述这种不是用户在说的话。",
     "你是「解语花」推荐引擎，你是用户的「嘴替」。",
@@ -110,7 +128,7 @@ export function buildSuggestionPrompt({ count, styles, selected, contextText, hi
     "3. 每条 5~20 个字，口语化",
     ...styleLines,
     "5. 模仿用户说话的方式：语气词、口头禅、用词风格、标点习惯都要像同一个人说出来的；但句子长短和内容饱满度优先保证推荐价值，不要为了模仿而把话说没",
-    "6. 推荐语的语言跟随对话的主要语言：对话是中文就用中文，是英文就用英文，别混",
+    langLine,
     "7. 反面例子（不要生成）：「早啊，今天想干点啥」「今天天气不错」——这是助手口吻或与对话无关",
     "8. 正面例子（紧扣对话）：「你刚说的那个方案，具体怎么操作？」「听你这么说我也想起一件事…」「那你帮我看看这个呗」",
     "9. 只输出一个合法 JSON 数组，首字符必须是 [，末字符必须是 ]；不要逐行输出独立对象，不要任何其他文字、不要解释。数组元素是对象：{\"text\": \"推荐的话\", \"direction\": \"第N条对应的方向名，照抄上方给出的方向，如'撒娇'\"}",
@@ -122,12 +140,56 @@ export function buildSuggestionPrompt({ count, styles, selected, contextText, hi
   ].join("\n");
 }
 
-// 按条数估算推荐卡片初始高度（2026-08-06 破案）：宿主 card 槽位初始高度 = 400/aspectRatio（无则固定 300px），
-// 且 card 槽位的 ui.resize 上报实测不生效（之前误信朋友圈 page 槽位协议，朋友圈没做过这种卡片）。
-// 正解：工具返回时按条数带上 aspectRatio，宿主初始高度直接精确匹配内容。
-// 估算公式（宽度固定 400px）：body padding 20 + 头部 29 + N×52（卡片最小高度）+ gap 6(N-1) + 余量 13
-function estimateCardHeight(n) {
-  return 58 * n + 56;
+function safeCardFilePart(value) {
+  return String(value || "suggestions")
+    .replace(/[^a-zA-Z0-9_.-]/g, "_")
+    .slice(0, 80) || "suggestions";
+}
+
+async function prepareCardArtifact(ctx, dataDir, { rid, items, action }) {
+  const cardDir = path.join(dataDir, "interactive-cards");
+  fs.mkdirSync(cardDir, { recursive: true });
+  const cardPath = path.join(cardDir, `${safeCardFilePart(rid)}.card.html`);
+  const tempPath = `${cardPath}.tmp-${process.pid}-${Date.now()}`;
+  const code = buildSuggestionCardDocument({ rid, items, action });
+  fs.writeFileSync(tempPath, code, "utf8");
+  fs.renameSync(tempPath, cardPath);
+
+  try {
+    if (typeof ctx?.stageFile === "function") {
+      try {
+        const staged = await ctx.stageFile({
+          sessionId: ctx.sessionId || undefined,
+          sessionRef: ctx.sessionRef || undefined,
+          sessionPath: ctx.sessionPath || undefined,
+          filePath: cardPath,
+          label: `解语花推荐-${safeCardFilePart(rid)}.card.html`,
+        });
+        const file = staged?.file || staged?.mediaItem || staged;
+        const fileId = file?.fileId || staged?.fileId || "";
+        if (fileId) return { fileId: String(fileId) };
+        ctx.log?.warn?.("[解语花] 卡片文件已写入但未拿到 fileId，改用 code 兜底");
+      } catch (err) {
+        ctx.log?.warn?.("[解语花] stageFile 失败，改用 show_card code 兜底", { error: err?.message || String(err) });
+      }
+    }
+    return { code };
+  } finally {
+    // stageFile 已完成登记；code 兜底也已经把内容带回，不让每轮推荐在 dataDir 留垃圾文件。
+    try { fs.unlinkSync(cardPath); } catch {}
+  }
+}
+
+function readHanaAppVersion(ctx) {
+  const direct = ctx?.hanaVersion || ctx?.appVersion || ctx?.hostVersion;
+  if (typeof direct === "string" && direct.trim()) return direct.trim();
+  const hanaHome = process.env.HANA_HOME || path.join(os.homedir(), ".hanako");
+  try {
+    const info = JSON.parse(fs.readFileSync(path.join(hanaHome, "server-info.json"), "utf8"));
+    return typeof info?.version === "string" ? info.version : "";
+  } catch {
+    return "";
+  }
 }
 
 export async function execute(input, ctx) {
@@ -185,7 +247,13 @@ export async function execute(input, ctx) {
     // 过滤后不够条数时原样重试一次（模型温度 0.9 有随机性），最多 2 次调用
     let items = [];
     for (let attempt = 1; attempt <= 2 && items.length < cfg.count; attempt++) {
-      const raw = await generateSuggestions(dataDir, prompt, { sampleFn });
+      const raw = await generateSuggestions(dataDir, prompt, {
+        sampleFn,
+        bus: ctx.bus,
+        agentId: ctx.agentId,
+        sessionPath,
+        fetcher: ctx.network?.fetch ? (url, options) => ctx.network.fetch(url, options) : undefined,
+      });
       const clean = parseSuggestions(raw, cfg.count).filter((it) => !hasAiFlavor(it.text));
       // 保留两次中较好的一次（第二次更差时用第一次的）
       if (clean.length > items.length) items = clean;
@@ -202,23 +270,48 @@ export async function execute(input, ctx) {
     }
 
     const { rid } = await createPending(dataDir, { items, sessionId, sessionPath });
+    const hostVersion = readHanaAppVersion(ctx);
 
-    // ── 返回卡片（结构参照表情包 express：content 显示文本 + details.card 卡片数据） ──
-    // aspectRatio 按条数估算（宿主 card 槽位初始高度 = 400/aspectRatio），让 iframe 初始高度精确贴合内容，不留白
+    if (!supportsInteractiveCard(hostVersion)) {
+      // 公开旧版（如 0.450.0）没有 show_card；沿用原有 iframe 卡片，
+      // 并且绝不把“请调用 show_card”的内部指令泄漏到用户正文里。
+      const card = buildLegacyCardDetails({
+        pluginId: ctx.pluginId || "jiegehua",
+        sessionId,
+        sessionRef: ctx.sessionRef,
+        sessionPath,
+        rid,
+        count: items.length,
+      });
+      return {
+        content: [{ type: "text", text: `已生成 ${items.length} 条推荐回复，附在回复下方` }],
+        details: { card },
+      };
+    }
+
+    const artifact = await prepareCardArtifact(ctx, dataDir, {
+      rid,
+      items,
+      action: cfg.action,
+    });
+    const cardInput = buildShowCardInput({
+      ...artifact,
+      title: "解语花推荐回复",
+    });
+
+    // 新版宿主只有内置 show_card 工具会进入 interactive_card 渲染链；
+    // details.card 无论写 iframe/webview 还是自定义 type，都只会成为 plugin_card 占位卡。
     return {
-      content: [{ type: "text", text: `已生成 ${items.length} 条推荐回复，附在回复下方` }],
+      content: [{ type: "text", text: buildShowCardInstruction(cardInput) }],
       details: {
-        card: {
-          type: "iframe",
-          pluginId: "jiegehua",
-          sessionId: ctx.sessionId || sessionId || undefined,
-          sessionRef: ctx.sessionRef || undefined,
-          sessionPath: ctx.sessionPath || sessionPath || undefined,
-          route: "/suggest?r=" + encodeURIComponent(rid),
-          aspectRatio: "400:" + estimateCardHeight(items.length),
-          title: "解语花"
-        }
-      }
+        suggestionCard: {
+          protocol: "show_card",
+          hostVersion,
+          rid,
+          count: items.length,
+          input: cardInput,
+        },
+      },
     };
   } catch (err) {
     ctx.log?.error?.("[解语花] 生成推荐失败", { error: err?.message || String(err) });

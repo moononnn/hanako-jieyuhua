@@ -4,7 +4,7 @@
 import { getConfig, createAskPending } from "../lib/data.js";
 import { validateAskInput } from "../lib/ask.js";
 import { findLatestSessionPath } from "../lib/session.js";
-import { getZhujianState } from "../lib/zhujian.js";
+import { isZhujianPresentationRunning } from "../lib/zhujian.js";
 
 export const name = "ask_user_choice";
 export const description = [
@@ -12,7 +12,7 @@ export const description = [
   "樱花悬浮球会直接把推荐回复区替换成提问区，用户作答后你会收到结构化的 Markdown 回传；提问面板已弹出后，不要在正文里重复问一遍。",
   "能自己查到或推断的事实不要问，只问用户自己的选择，或确实查不到的关键歧义。",
   "适合：选方案、确认是否执行、选择风格/时间/目标、补充关键偏好。",
-  "不适合：答案唯一、只是陈述、纯闲聊，或没有正在运行的解语花悬浮球。",
+  "不适合：答案唯一、只是陈述、纯闲聊，或没有正在运行的解语花/融合悬浮球。",
   "参数：question 是要用户拍板的问题；options 是 2～6 个选项；header 可选，是面板上的小标题。",
   "需要推荐某个选项时，把它放在第一项，并在 label 末尾加 (Recommended)。",
 ].join("\n");
@@ -65,12 +65,12 @@ export async function execute(input, ctx) {
   const cfg = getConfig(dataDir);
   if (cfg.presentation !== "ball") {
     return {
-      content: [{ type: "text", text: "（解语花当前不是悬浮球模式，暂时无法弹出提问面板）" }],
+      content: [{ type: "text", text: "（解语花当前不是悬浮球模式，弹窗用不了；那就当作普通对话，直接在正文里自然说出你的看法或把需要用户决定的内容写清楚，不要强行列选项让人选。" }],
     };
   }
-  if (!getZhujianState().running) {
+  if (!(await isZhujianPresentationRunning(ctx))) {
     return {
-      content: [{ type: "text", text: "（解语花悬浮球没有运行，提问面板暂时无法弹出）" }],
+      content: [{ type: "text", text: "（解语花或融合悬浮球没有运行，提问面板弹不出来；没关系，这次就当作普通对话，直接在正文里自然回应，把判断/解释/观点说清楚，不要为了想弹窗而把话题硬拗成选项让用户选。）" }],
     };
   }
 

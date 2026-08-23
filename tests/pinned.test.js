@@ -12,7 +12,7 @@ import path from "node:path";
 const home = fs.mkdtempSync(path.join(os.tmpdir(), "jiegehua-pinned-test-"));
 process.env.HANA_HOME = home;
 
-const { listRecentSessions, listNamedSessions, findMostActiveSession } = await import("../lib/session.js");
+const { listRecentSessions, listNamedSessions, findMostActiveSession, readRecentMessages } = await import("../lib/session.js");
 const { normalizeData } = await import("../lib/data.js");
 const { resolveBallTarget } = await import("../lib/zhujian.js");
 
@@ -105,6 +105,27 @@ test("listNamedSessions 优先使用 Hana 返回的真实会话标题", async ()
   assert.equal(list[0].agentName, "小花");
 });
 
+test("listNamedSessions 从会话路径补出缺失的助手身份", async () => {
+  fs.writeFileSync(
+    path.join(home, "agents", "hanako", "config.yaml"),
+    "agent:\n  name: 路径助手\n",
+    "utf-8",
+  );
+  const fp = writeSession("hanako", "path-agent.jsonl", [userLine("2026-08-11T06:00:00.000Z", "路径里的助手")]);
+  const list = await listNamedSessions({
+    request: async () => ({ sessions: [{ path: fp, title: "路径识别", modified: "2026-08-11T06:01:00.000Z" }] }),
+  }, 1);
+  assert.equal(list[0].agentId, "hanako");
+  assert.equal(list[0].agentName, "路径助手");
+});
+
+test("listNamedSessions 总线挂起时回退，不让目标选择一直等", async () => {
+  const started = Date.now();
+  const list = await listNamedSessions({ request: async () => new Promise(() => {}) }, 1);
+  assert.ok(Date.now() - started < 4000, "目标列表应在 UI 超时前回退");
+  assert.ok(Array.isArray(list));
+});
+
 test("listNamedSessions 按活跃时间排序并压缩为指定的 5 个窗口", async () => {
   const sessions = Array.from({ length: 7 }, (_, i) => ({
     path: `C:/sessions/${i}.jsonl`,
@@ -138,6 +159,17 @@ test("resolveBallTarget 钉住会话存在时返回钉住目标", async () => {
   assert.equal(target.pinned, true);
 });
 
+test("resolveBallTarget 从固定会话路径补出缺失的 agentId", async () => {
+  const dataDir = tmpDataDir();
+  const fp = writeSession("hanako", "pin-without-agent.jsonl", [userLine("2026-08-11T02:30:00.000Z", "缺失 agentId 的固定窗口")]);
+  fs.writeFileSync(path.join(dataDir, "data.json"), JSON.stringify({
+    config: { presentation: "ball" },
+    pinnedTarget: { agentId: "old-wrong-id", sessionPath: fp, title: "固定窗口" },
+  }));
+  const target = await resolveBallTarget(dataDir);
+  assert.equal(target.agentId, "hanako");
+});
+
 test("resolveBallTarget 钉住会话已失效时清除并返回 null", async () => {
   const dataDir = tmpDataDir();
   const data = { config: { presentation: "ball" }, pinnedTarget: { agentId: "hanako", sessionPath: "C:/不存在/xx.jsonl", title: "没了" } };
@@ -159,4 +191,57 @@ test("findMostActiveSession 在钉住数据存在时仍正常工作", () => {
   const fp = writeSession("hanako", "active.jsonl", [userLine("2099-01-01T00:00:00.000Z", "最新消息")]);
   const result = findMostActiveSession();
   assert.equal(result.sessionPath, fp);
+});
+
+test("长会话末尾超过 256KB 时仍能定位并读取最新用户消息", () => {
+  const longPath = writeSession("long-active", "long.jsonl", [
+    userLine("2100-01-01T00:00:00.000Z", "当前窗口的最新用户消息"),
+  ]);
+  fs.appendFileSync(
+    longPath,
+    JSON.stringify({
+      type: "message",
+      timestamp: "2100-01-01T00:01:00.000Z",
+      message: { role: "assistant", content: [{ type: "text", text: "长回复".repeat(120_000) }] },
+    }) + "\n",
+    "utf-8",
+  );
+  assert.ok(fs.statSync(longPath).size > 256 * 1024);
+
+  const olderPath = writeSession("older-window", "older.jsonl", [
+    userLine("2099-12-31T23:00:00.000Z", "旧窗口消息"),
+  ]);
+  const target = findMostActiveSession();
+  assert.equal(target.sessionPath, longPath, "不能因为固定尾窗漏读而退回旧窗口");
+
+  const messages = readRecentMessages(longPath, 2);
+  assert.deepEqual(messages.map((item) => item.role), ["user", "assistant"]);
+  assert.match(messages[0].content, /当前窗口/);
+  assert.ok(olderPath.endsWith("older.jsonl"));
+});
+
+test("反向扫描跨 64KB UTF-8 边界、无最终换行和截断尾行都能安全处理", () => {
+  const dir = path.join(home, "agents", "edge-cases", "sessions");
+  fs.mkdirSync(dir, { recursive: true });
+
+  const utf8Path = path.join(dir, "utf8.jsonl");
+  fs.writeFileSync(
+    utf8Path,
+    JSON.stringify({
+      type: "message",
+      timestamp: "2101-01-01T00:00:00.000Z",
+      padding: "a".repeat(64 * 1024),
+      message: { role: "user", content: [{ type: "text", text: "🌸跨块中文" }] },
+    }),
+    "utf-8",
+  );
+  assert.equal(readRecentMessages(utf8Path, 1)[0].content, "🌸跨块中文");
+
+  const truncatedPath = path.join(dir, "truncated.jsonl");
+  fs.writeFileSync(
+    truncatedPath,
+    userLine("2101-01-01T00:01:00.000Z", "前一条完整消息") + "\n{" + "\"type\":\"message\"",
+    "utf-8",
+  );
+  assert.equal(readRecentMessages(truncatedPath, 1)[0].content, "前一条完整消息");
 });

@@ -1,22 +1,14 @@
-import importlib.util
 import math
-import os
-import pathlib
 import random
 import unittest
 
 from PyQt6.QtGui import QImage, QPainter, QPixmap
 from PyQt6.QtSvg import QSvgRenderer
 
-
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-MODULE_PATH = pathlib.Path(__file__).parents[1] / "python" / "zhujian_app.py"
-SPEC = importlib.util.spec_from_file_location("zhujian_app", MODULE_PATH)
-zhujian = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(zhujian)
+from _zhujian_test_support import MODULE_PATH, QtTestCase, _APP, zhujian
 
 
-class ZhujianMotionTests(unittest.TestCase):
+class ZhujianMotionTests(QtTestCase):
     def test_ask_poll_uses_latest_question_and_custom_input_has_200_char_limit(self):
         pending = [
             {"askId": "broken", "ts": "not-a-number"},
@@ -67,73 +59,71 @@ class ZhujianMotionTests(unittest.TestCase):
         self.assertEqual(menu._ask_entry["askId"], "ask-first")
         menu._ask_responding = False
         menu._ask_finished = True
-        menu.restore_recommendations("ask-second")
+        menu.finish_ask_and_collapse("ask-second")
         self.assertEqual(menu._ask_entry["askId"], "ask-first")
-        menu.restore_recommendations("ask-first")
+        menu.finish_ask_and_collapse("ask-first")
         self.assertIsNone(menu._ask_entry)
         menu.close()
         ball.close()
         app.processEvents()
 
-    def test_collapsed_ask_stays_collapsed_when_menu_hidden(self):
-        # 折叠（放弃）后服务端作废失败/延迟时，轮询仍返回这条题：菜单关着也绝不弹回
+    def test_hidden_ask_remains_pending_and_reopens_same_question(self):
+        # 回归：收起提问面板只是隐藏窗口，不能把未回答的 ask 变成普通推荐。
         app = zhujian.QApplication.instance() or zhujian.QApplication([])
         ball = zhujian.ZhujianBall()
         menu = zhujian.ZhujianMenu(ball)
         ball.menu = menu
         ask = {
-            "askId": "ask-collapse-1",
-            "question": "要折叠的题",
+            "askId": "ask-hidden-1",
+            "question": "暂时收起后还要保留的问题",
             "options": [{"label": "甲"}, {"label": "乙"}],
             "ts": 1,
         }
         menu.show_ask(ask)
+        menu.move_to_ball()
+        menu.show()
         app.processEvents()
-        # 用户第二次点击：折叠（放弃）
-        menu._collapsed_ask_ids.append("ask-collapse-1")
-        menu.restore_recommendations()
-        menu.hide()
+
+        # 第一次点击花朵：只收起窗口，ask 状态和花瓣提醒都保留。
+        ball._toggle_expand()
+        self.assertFalse(menu.isVisible())
+        self.assertTrue(menu.is_ask_open())
+        self.assertTrue(ball._ask_emitting)
+        self.assertEqual(menu._ask_entry["askId"], "ask-hidden-1")
+
+        # 再次点击花朵：打开的仍然是同一个 ask，而不是普通推荐。
+        ball._toggle_expand()
         app.processEvents()
+        self.assertTrue(menu.isVisible())
+        self.assertTrue(menu.is_ask_open())
+        self.assertEqual(menu.lbl_ask_question.text(), ask["question"])
+
+        # 用户再次收起后，轮询只保留挂起状态，不自动把窗口打回来。
+        ball._toggle_expand()
+        self.assertFalse(menu.isVisible())
         ball._apply_ask_payload({"ok": True, "pending": [ask]})
         app.processEvents()
         self.assertFalse(menu.isVisible())
+        self.assertTrue(menu.is_ask_open())
+        self.assertEqual(menu._ask_entry["askId"], "ask-hidden-1")
+
+        # 手动重新点花朵仍回到原题。
+        ball._toggle_expand()
+        app.processEvents()
+        self.assertTrue(menu.isVisible())
+        self.assertTrue(menu.is_ask_open())
+
+        # 真正结束 ask 后才允许下次打开恢复普通推荐。
+        menu.finish_ask_and_collapse("ask-hidden-1")
+        self.assertFalse(menu.isVisible())
         self.assertFalse(menu.is_ask_open())
+        self.assertFalse(ball._ask_emitting)
         menu.close()
         ball.close()
         app.processEvents()
 
-    def test_collapsed_ask_does_not_pop_back_when_menu_reopened(self):
-        # 回归：折叠后用户重新打开菜单（推荐态可见），轮询不得把题弹回来，
-        # 更不能在弹回时清掉折叠集合（否则进入「关了又弹」的死循环）
-        app = zhujian.QApplication.instance() or zhujian.QApplication([])
-        ball = zhujian.ZhujianBall()
-        menu = zhujian.ZhujianMenu(ball)
-        ball.menu = menu
-        ask = {
-            "askId": "ask-collapse-2",
-            "question": "折叠后重开菜单",
-            "options": [{"label": "甲"}, {"label": "乙"}],
-            "ts": 2,
-        }
-        menu.show_ask(ask)
-        app.processEvents()
-        menu._collapsed_ask_ids.append("ask-collapse-2")
-        menu.restore_recommendations()
-        menu.hide()
-        app.processEvents()
-        # 用户重新点球打开菜单（推荐态）
-        menu.show()
-        app.processEvents()
-        ball._apply_ask_payload({"ok": True, "pending": [ask]})
-        app.processEvents()
-        self.assertFalse(menu.is_ask_open())
-        self.assertIn("ask-collapse-2", menu._collapsed_ask_ids)
-        menu.close()
-        ball.close()
-        app.processEvents()
-
-    def test_new_ask_still_pops_even_after_previous_collapse(self):
-        # 折叠过旧题不影响新题弹出；show_ask 也不得清理折叠集合
+    def test_new_ask_replaces_previous_hidden_question(self):
+        # 服务端出现更新的 ask 时，隐藏中的旧题让位给最新题，但仍保持 ask 模式。
         app = zhujian.QApplication.instance() or zhujian.QApplication([])
         ball = zhujian.ZhujianBall()
         menu = zhujian.ZhujianMenu(ball)
@@ -141,17 +131,81 @@ class ZhujianMotionTests(unittest.TestCase):
         old = {"askId": "ask-old", "question": "旧题", "options": [{"label": "甲"}], "ts": 1}
         new = {"askId": "ask-new", "question": "新题", "options": [{"label": "继续"}], "ts": 3}
         menu.show_ask(old)
-        app.processEvents()
-        menu._collapsed_ask_ids.append("ask-old")
-        menu.restore_recommendations()
         menu.hide()
-        menu.show()
         app.processEvents()
         ball._apply_ask_payload({"ok": True, "pending": [old, new]})
         app.processEvents()
+        self.assertTrue(menu.isVisible())
         self.assertTrue(menu.is_ask_open())
         self.assertEqual(menu._ask_entry["askId"], "ask-new")
-        self.assertIn("ask-old", menu._collapsed_ask_ids)
+        self.assertEqual(menu.lbl_ask_question.text(), "新题")
+        menu.close()
+        ball.close()
+        app.processEvents()
+
+    def test_same_ask_poll_does_not_clear_input(self):
+        # 回归：同一条 ask 轮询回来时，不得重绘并清空用户正在填写的答案。
+        app = zhujian.QApplication.instance() or zhujian.QApplication([])
+        ball = zhujian.ZhujianBall()
+        menu = zhujian.ZhujianMenu(ball)
+        ball.menu = menu
+        ask = {
+            "askId": "ask-same-poll",
+            "question": "正在输入时不要刷新我",
+            "options": [{"label": "甲"}, {"label": "乙"}],
+            "ts": 1,
+        }
+        menu.show_ask(ask)
+        menu.show()
+        menu.ask_input.setText("我正在输入的答案")
+        ball._apply_ask_payload({"ok": True, "pending": [ask]})
+        app.processEvents()
+        self.assertEqual(menu.ask_input.text(), "我正在输入的答案")
+        self.assertEqual(menu.lbl_ask_question.text(), ask["question"])
+        menu.close()
+        ball.close()
+        app.processEvents()
+
+    def test_pending_empty_finishes_ask_and_closes_menu(self):
+        # 回归：主对话直接输入触发 pending 变空后，ask 才真正结束并收起。
+        app = zhujian.QApplication.instance() or zhujian.QApplication([])
+        ball = zhujian.ZhujianBall()
+        menu = zhujian.ZhujianMenu(ball)
+        ball.menu = menu
+        ask = {"askId": "ask-finish-poll", "question": "等待主对话输入", "options": [{"label": "甲"}], "ts": 1}
+        menu.show_ask(ask)
+        menu.show()
+        app.processEvents()
+        ball._apply_ask_payload({"ok": True, "pending": []})
+        app.processEvents()
+        self.assertFalse(menu.is_ask_open())
+        self.assertFalse(menu.isVisible())
+        self.assertFalse(ball._ask_emitting)
+        menu.close()
+        ball.close()
+        app.processEvents()
+
+    def test_ask_response_success_enters_finished_state_before_collapse(self):
+        # 回归：弹窗作答成功先进入 finished，再由统一收口函数清理状态。
+        app = zhujian.QApplication.instance() or zhujian.QApplication([])
+        ball = zhujian.ZhujianBall()
+        menu = zhujian.ZhujianMenu(ball)
+        ball.menu = menu
+        ask = {"askId": "ask-finish-response", "question": "选择后收口", "options": [{"label": "甲"}], "ts": 1}
+        menu.show_ask(ask)
+        menu.show()
+        app.processEvents()
+        menu._apply_ask_response({
+            "ok": True,
+            "askId": ask["askId"],
+            "mode": "option",
+            "choice": "甲",
+        })
+        self.assertTrue(menu._ask_finished)
+        self.assertFalse(menu.is_ask_open())
+        menu.finish_ask_and_collapse(ask["askId"])
+        self.assertIsNone(menu._ask_entry)
+        self.assertFalse(menu.isVisible())
         menu.close()
         ball.close()
         app.processEvents()
@@ -197,30 +251,68 @@ class ZhujianMotionTests(unittest.TestCase):
         ball.close()
         app.processEvents()
 
-    def test_toggle_expand_two_clicks_folds_and_third_opens_recommendations(self):
-        # 端到端：第一次点击只提醒，第二次折叠+关闭，第三次打开的是推荐态而非旧题
+    def test_panel_sections_and_tool_rows_use_consistent_labels(self):
+        # 回归：推荐区和工具区都有明确标题，工具项统一为标题 + 说明 + 动作。
         app = zhujian.QApplication.instance() or zhujian.QApplication([])
         ball = zhujian.ZhujianBall()
         menu = zhujian.ZhujianMenu(ball)
-        ball.menu = menu
-        ask = {"askId": "ask-fold", "question": "折叠吧", "options": [{"label": "甲"}], "ts": 4}
-        menu.show_ask(ask)
-        menu.move_to_ball()
+        self.assertEqual(menu.lbl_recommend_section.text(), "推荐回复")
+        self.assertEqual(menu.lbl_section.text(), "对话工具")
+        self.assertEqual(menu.lbl_say_title.text(), "朗读回复")
+        self.assertEqual(menu.btn_say.text(), "念给我听")
+        self.assertEqual(menu.lbl_rename_title.text(), "会话标题")
+        self.assertEqual(menu.btn_rename.text(), "生成新标题")
+        self.assertEqual(menu.btn_undo.text(), "还原")
+        self.assertEqual(len(menu.findChildren(zhujian.QFrame, "toolRow")), 2)
+
+        menu.lbl_cache_time.setText("上次生成 10:38")
         menu.show()
+        menu.layout().activate()
         app.processEvents()
-        # 第一次点击：只提醒不折叠
-        ball._toggle_expand()
-        self.assertTrue(menu.isVisible())
-        self.assertTrue(menu._ask_close_armed)
-        # 第二次点击：折叠 + 关闭
-        ball._toggle_expand()
-        self.assertFalse(menu.isVisible())
-        self.assertFalse(menu.is_ask_open())
-        self.assertIn("ask-fold", menu._collapsed_ask_ids)
-        # 第三次点击：打开的是推荐态，不是旧题
-        ball._toggle_expand()
-        self.assertTrue(menu.isVisible())
-        self.assertFalse(menu.is_ask_open())
+        self.assertGreater(menu.btn_refresh.geometry().x(), menu.lbl_cache_time.geometry().x())
+        app.processEvents()
+        ask = {
+            "askId": "ask-layout-hide",
+            "question": "布局隐藏测试",
+            "options": [{"label": "甲"}, {"label": "乙"}],
+            "ts": 1,
+        }
+        menu.show_ask(ask)
+        app.processEvents()
+        self.assertFalse(menu.recommend_body.isVisible())
+        self.assertEqual(menu.grid.count(), 0)
+        self.assertFalse(menu.say_tool.isVisible())
+        self.assertFalse(menu.rename_tool.isVisible())
+
+        menu._ask_finished = True
+        menu.finish_ask_and_collapse("ask-layout-hide")
+        menu.show()
+        menu.prepare_for_show()
+        app.processEvents()
+        self.assertTrue(menu.recommend_body.isVisible())
+        self.assertTrue(menu.say_tool.isVisible())
+        self.assertTrue(menu.rename_tool.isVisible())
+        menu.close()
+        ball.close()
+        app.processEvents()
+
+    def test_tool_rows_survive_narrow_panel_width(self):
+        # 回归：标题工具的两个动作在窄面板下换到说明下面，不挤压文字或越界。
+        app = zhujian.QApplication.instance() or zhujian.QApplication([])
+        ball = zhujian.ZhujianBall()
+        menu = zhujian.ZhujianMenu(ball)
+        menu.show()
+        # 这个几何测试覆盖“还原按钮已出现”时的窄面板布局；默认态按钮应保持隐藏。
+        menu._set_undo_available(True)
+        app.processEvents()
+        for width in (280, 344):
+            menu.setFixedWidth(width)
+            menu.layout().activate()
+            app.processEvents()
+            self.assertLessEqual(menu.btn_rename.geometry().right(), menu.rename_tool.width())
+            self.assertLessEqual(menu.btn_undo.geometry().right(), menu.rename_tool.width())
+            self.assertGreater(menu.btn_undo.geometry().y(), menu.btn_rename.geometry().y())
+            self.assertGreaterEqual(menu.rename_tool.height(), 100)
         menu.close()
         ball.close()
         app.processEvents()

@@ -4,6 +4,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -20,12 +21,38 @@ import {
 import { claimAndSend, getSuggestionText } from "../lib/send.js";
 import {
   extractConversationMessage,
-  readRecentMessages
+  readRecentMessages,
+  readRecentAssistantMessages,
+  selectRecentAssistantMessage
 } from "../lib/session.js";
+import { readBody, shouldBlockOriginalStart, startZhujian } from "../lib/zhujian.js";
 
 function tmpDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "jiegehua-zhujian-"));
 }
+
+function fakeRequest(chunks) {
+  const req = new EventEmitter();
+  req.destroyed = false;
+  req.resumed = false;
+  req.destroy = () => { req.destroyed = true; };
+  req.resume = () => { req.resumed = true; };
+  queueMicrotask(() => {
+    for (const chunk of chunks) req.emit("data", chunk);
+    req.emit("end");
+  });
+  return req;
+}
+
+// ═══ 代理请求体 ═══
+
+test("readBody 超过限制时排空请求并返回结构化错误，不重置连接", async () => {
+  const req = fakeRequest([Buffer.from('{"audio":"12345"}')]);
+  const body = await readBody(req, 4);
+  assert.equal(body.__error, "body_too_large");
+  assert.equal(req.destroyed, false);
+  assert.equal(req.resumed, true);
+});
 
 // ═══ presentation 配置 ═══
 
@@ -43,6 +70,52 @@ test("normalizeConfig 拒绝非法 presentation，回退 card", () => {
   assert.equal(normalizeConfig({ presentation: "both" }).presentation, "card");
   assert.equal(normalizeConfig({ presentation: "xxx" }).presentation, "card");
   assert.equal(normalizeConfig({ presentation: 123 }).presentation, "card");
+});
+
+test("解语花启动守卫按融合状态桥动态判断", () => {
+  assert.equal(shouldBlockOriginalStart({ ok: true, blocking: true }), true);
+  assert.equal(shouldBlockOriginalStart({ ok: true, blocking: false }), false);
+  assert.equal(shouldBlockOriginalStart({ ok: true, mode: "fused" }), false);
+  assert.equal(shouldBlockOriginalStart({ ok: true, mode: "restoring", blocking: true }), true);
+  assert.equal(shouldBlockOriginalStart({ ok: true, mode: "restoring", blocking: true }, { allowDuringRestore: true }), false);
+  assert.equal(shouldBlockOriginalStart(null), false);
+  // 融合球进程句柄已丢（pid 为 null）：球其实没在跑，不应拦截原版启动
+  assert.equal(shouldBlockOriginalStart({ ok: true, blocking: true, fusionPid: null }), false);
+  // 球真在跑（pid 非空）：仍拦截
+  assert.equal(shouldBlockOriginalStart({ ok: true, blocking: true, fusionPid: 12345 }), true);
+});
+
+test("融合球出现时解语花原版进程不会重复启动", async () => {
+  const result = await startZhujian({
+    bus: {
+      request: async () => ({ ok: true, blocking: true }),
+    },
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.fusion, true);
+  assert.match(result.error, /融合球/);
+});
+
+test("解语花启动请求并发时共享同一启动流程", async () => {
+  let release;
+  let requests = 0;
+  const wait = new Promise((resolve) => { release = resolve; });
+  const ctx = {
+    bus: {
+      request: async () => {
+        requests += 1;
+        await wait;
+        return { ok: true, blocking: true };
+      },
+    },
+  };
+  const first = startZhujian(ctx);
+  const second = startZhujian(ctx);
+  release();
+  const results = await Promise.all([first, second]);
+  assert.equal(requests, 1);
+  assert.equal(results[0].fusion, true);
+  assert.equal(results[1].fusion, true);
 });
 
 // ═══ ballCache 归一化 ═══
@@ -230,6 +303,24 @@ test("readRecentMessages 读 Hana 现行格式文件（过滤工具消息）", (
   assert.deepEqual(msgs[2], { role: "user", content: "第二条" });
 });
 
+test("readRecentAssistantMessages 返回最新回复及前 5 条，最新在前", () => {
+  const base = tmpDir();
+  const fp = path.join(base, "tts-replies.jsonl");
+  const entries = [];
+  for (let i = 0; i < 7; i++) {
+    entries.push({ message: { role: "user", content: [{ type: "text", text: `问题${i}` }] }, timestamp: `2026-08-19T00:0${i}:00.000Z` });
+    entries.push({ id: `assistant-${i}`, message: { role: "assistant", content: [{ type: "text", text: `回复${i}` }] }, timestamp: `2026-08-19T00:0${i}:30.000Z` });
+  }
+  fs.writeFileSync(fp, entries.map((entry) => JSON.stringify(entry)).join("\n"), "utf-8");
+  const replies = readRecentAssistantMessages(fp, 6);
+  assert.equal(replies.length, 6);
+  assert.deepEqual(replies.map((item) => item.content), ["回复6", "回复5", "回复4", "回复3", "回复2", "回复1"]);
+  assert.equal(replies[0].entryId, "assistant-6");
+  assert.equal(selectRecentAssistantMessage(replies, { index: 5, entryId: "assistant-1", ts: replies[5].ts }).content, "回复1");
+  assert.equal(selectRecentAssistantMessage(replies, { index: 5, entryId: "missing", ts: replies[5].ts }).content, "回复1");
+  assert.equal(selectRecentAssistantMessage(replies, { index: 0, entryId: "missing", ts: 0 }), null);
+});
+
 // ═══ claimAndSend：原子发送 ═══
 
 function fakeBus(result) {
@@ -311,6 +402,19 @@ test("claimAndSend 发送失败回滚 used，可重试", async () => {
   // 已回滚：换个正常通道可以重发
   const ok = await claimAndSend(dir, { rid, index: 0 }, fakeBus());
   assert.equal(ok.ok, true);
+});
+
+test("claimAndSend 总线返回 ok:false 时回滚并透传错误", async () => {
+  const dir = tmpDir();
+  const { rid } = await createPending(dir, {
+    items: [{ text: "总线拒绝这句" }],
+    sessionId: "s1",
+    sessionPath: "/s1.jsonl"
+  });
+  const res = await claimAndSend(dir, { rid, index: 0 }, fakeBus({ ok: false, error: "session not found" }));
+  assert.equal(res.ok, false);
+  assert.match(res.error, /session not found/);
+  assert.equal(loadData(dir).pending[rid].used, false);
 });
 
 test("claimAndSend 找不到目标会话 → 回滚并可重试", async () => {

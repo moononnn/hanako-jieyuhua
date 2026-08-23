@@ -1,16 +1,9 @@
-import importlib.util
-import os
-import pathlib
 import unittest
 
 from PyQt6.QtCore import QEvent, QPointF, Qt
 from PyQt6.QtGui import QMouseEvent
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-MODULE_PATH = pathlib.Path(__file__).parents[1] / "python" / "zhujian_app.py"
-SPEC = importlib.util.spec_from_file_location("zhujian_app", MODULE_PATH)
-zhujian = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(zhujian)
+from _zhujian_test_support import QtTestCase, zhujian
 
 
 def mouse_press(global_pos, button):
@@ -24,7 +17,7 @@ def mouse_press(global_pos, button):
     )
 
 
-class RightClickToggleTests(unittest.TestCase):
+class RightClickToggleTests(QtTestCase):
     def _ball(self):
         app = zhujian.QApplication.instance() or zhujian.QApplication([])
         ball = zhujian.ZhujianBall()

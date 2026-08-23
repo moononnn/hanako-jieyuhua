@@ -26,10 +26,22 @@ test("prompt 包含模仿说话风格条款（含风险闸）", () => {
   assert.ok(p.includes("不要为了模仿而把话说没"));
 });
 
-test("prompt 包含语言跟随条款", () => {
-  const p = buildSuggestionPrompt({ count: 3, styles: STYLES, selected: undefined, contextText: "对话", hint: "" });
-  assert.ok(p.includes("语言跟随对话的主要语言"));
-  assert.ok(p.includes("别混"));
+test("中文对话 → prompt 锁定中文输出（规则判定，非模型自判）", () => {
+  const p = buildSuggestionPrompt({ count: 3, styles: STYLES, selected: undefined, contextText: "用户: 今天天气真好，我们去散步吧\n助手: 好呀", hint: "" });
+  assert.ok(p.includes("这次对话主要是中文"));
+  assert.ok(p.includes("必须全部用中文输出，不要用英文"));
+  assert.ok(!p.includes("用英文输出"));
+});
+
+test("英文对话 → prompt 锁定英文输出", () => {
+  const p = buildSuggestionPrompt({ count: 3, styles: STYLES, selected: undefined, contextText: "用户: Let's go for a walk today\n助手: Sure, great idea", hint: "" });
+  assert.ok(p.includes("这次对话主要是英文"));
+  assert.ok(p.includes("必须全部用英文输出，不要用中文"));
+});
+
+test("空上下文 → 默认锁定中文（中文用户兜底）", () => {
+  const p = buildSuggestionPrompt({ count: 3, styles: STYLES, selected: undefined, contextText: "", hint: "" });
+  assert.ok(p.includes("必须全部用中文输出"));
 });
 
 test("prompt 保留原有硬性要求（紧扣内容/口吻/长度/正反例/JSON 契约）", () => {

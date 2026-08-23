@@ -4,15 +4,21 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { getConfig, setConfig, loadData, getPending, withDataLock, normalizeStyles, DEFAULT_CONFIG, saveData } from "../lib/data.js";
-import { getAvailableModels, generateSuggestions, parseSuggestions, encryptKey, redactSecrets, validateBaseUrl, callLLM } from "../lib/llm.js";
+import { getConfig, setConfig, updateTtsConfig, loadData, getPending, withDataLock, normalizeStyles, DEFAULT_CONFIG, saveData } from "../lib/data.js";
+import { getAvailableModels, generateSuggestions, parseSuggestions, redactSecrets, validateBaseUrl, callLLM } from "../lib/llm.js";
+import { protectKey, maskKey, getStorageMode } from "../lib/crypto.js";
 import { compareVersions } from "../lib/version.js";
+import { listAgents } from "../lib/session.js";
+import { synthesizeSpeech, listTtsCandidates, voicesForProtocol, clampNum } from "../lib/tts.js";
+import { playAudioFile } from "../lib/play.js";
+import { listFavorites, deleteFavorite, favoriteFile, groupFavorites } from "../lib/favorites.js";
 import { claimAndSend } from "../lib/send.js";
 import {
   startZhujian,
   stopZhujian,
   getZhujianState,
   checkZhujianDeps,
+  consumeZhujianDismissed,
 } from "../lib/zhujian.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -37,14 +43,32 @@ export default function registerPluginApiRoutes(app, ctx) {
     const body = JSON.stringify(obj);
     return new Response(body, {
       status: status || 200,
-      headers: { "Content-Type": "application/json; charset=utf-8" }
+      headers: {
+        "Content-Type": "application/json; charset=utf-8",
+        "Cache-Control": "no-store",
+      }
     });
   };
+
+  function sanitizeConfigForClient(cfg) {
+    const out = structuredClone(cfg || {});
+    const modelKey = out.model?.custom?.apiKey || "";
+    const ttsKey = out.tts?.apiKey || "";
+    if (out.model?.custom) {
+      out.model.custom.apiKey = maskKey(modelKey);
+      out.model.custom.apiKeyStorage = getStorageMode(modelKey);
+    }
+    if (out.tts) {
+      out.tts.apiKey = maskKey(ttsKey);
+      out.tts.apiKeyStorage = getStorageMode(ttsKey);
+    }
+    return out;
+  }
 
   // ─── 读配置 ───
   app.get("/api/config", (c) => {
     const cfg = getConfig(dataDir);
-    return json({ ok: true, config: cfg });
+    return json({ ok: true, config: sanitizeConfigForClient(cfg) });
   });
 
   // ─── 写配置 ───
@@ -70,8 +94,10 @@ export default function registerPluginApiRoutes(app, ctx) {
         const custom = m.custom || {};
         if (typeof custom.baseUrl === "string") modelPatch.custom = { ...modelPatch.custom, baseUrl: custom.baseUrl.trim() };
         if (typeof custom.model === "string") modelPatch.custom = { ...modelPatch.custom, model: custom.model.trim() };
-        if (typeof custom.apiKey === "string" && custom.apiKey && custom.apiKey !== "********") {
-          modelPatch.custom = { ...modelPatch.custom, apiKey: encryptKey(custom.apiKey) };
+        if (m.clearApiKey === true || custom.clearApiKey === true) {
+          modelPatch.custom = { ...modelPatch.custom, apiKey: "" };
+        } else if (typeof custom.apiKey === "string" && custom.apiKey && custom.apiKey !== "********") {
+          modelPatch.custom = { ...modelPatch.custom, apiKey: await protectKey(custom.apiKey) };
         }
         patch.model = modelPatch;
       }
@@ -108,7 +134,9 @@ export default function registerPluginApiRoutes(app, ctx) {
         raw = typeof response === "string" ? response : (response?.text ?? response?.content ?? "");
       } else if (source === "custom") {
         const baseUrl = String(m.custom?.baseUrl || "").trim();
-        const apiKey = String(m.custom?.apiKey || "").trim();
+        const submittedKey = String(m.custom?.apiKey || "").trim();
+        const savedKey = String(getConfig(dataDir).model?.custom?.apiKey || "").trim();
+        const apiKey = submittedKey && submittedKey !== "********" ? submittedKey : savedKey;
         const model = String(m.custom?.model || "").trim();
         const urlErr = validateBaseUrl(baseUrl);
         if (urlErr) return json({ ok: false, error: urlErr });
@@ -116,12 +144,22 @@ export default function registerPluginApiRoutes(app, ctx) {
         raw = await callLLM(prompt, {
           modelId: model,
           custom: { baseUrl, apiKey, model, api: "openai-completions" },
+          fetcher: ctx.network?.fetch ? (url, options) => ctx.network.fetch(url, options) : undefined,
           maxTokens: 1500,
           temperature: 0.9
         });
       } else {
         if (!m.providerId || !m.modelId) return json({ ok: false, error: "还没有选择模型，请到设置页选一个" });
-        raw = await callLLM(prompt, { providerId: m.providerId, modelId: m.modelId, maxTokens: 1500, temperature: 0.9 });
+        if (!ctx.bus || typeof ctx.bus.request !== "function") {
+          return json({ ok: false, error: "当前 Hana 没有可用的模型通道" });
+        }
+        const result = await ctx.bus.request("utility:call-text", {
+          messages: [{ role: "user", content: prompt }],
+          providerId: m.providerId,
+          modelId: m.modelId,
+          operation: "jiegehua-model-test",
+        }, { timeoutMs: 30000 });
+        raw = extractModelText(result);
       }
 
       const items = parseSuggestions(raw, count);
@@ -220,7 +258,14 @@ export default function registerPluginApiRoutes(app, ctx) {
       ].join("\n");
 
       const sampleFn = (opts) => ctx.model?.sample ? ctx.model.sample(opts) : Promise.reject(new Error("当前会话模型不可用"));
-      const raw = await generateSuggestions(dataDir, prompt, { sampleFn, maxTokens: 800 });
+      const raw = await generateSuggestions(dataDir, prompt, {
+        sampleFn,
+        bus: ctx.bus,
+        agentId: ctx.agentId,
+        sessionPath: ctx.sessionPath,
+        fetcher: ctx.network?.fetch ? (url, options) => ctx.network.fetch(url, options) : undefined,
+        maxTokens: 800,
+      });
 
       const cleanReply = raw.replace(/<suggestion>[\s\S]*?<\/suggestion>/g, "").trim();
       let suggestion = null;
@@ -294,6 +339,162 @@ export default function registerPluginApiRoutes(app, ctx) {
     }
   });
 
+  // ─── 保存语音朗读配置（三档来源：auto/hana/custom） ───
+  app.post("/api/tts/save", async (c) => {
+    try {
+      const body = await c.req.json().catch(() => ({}));
+      const patch = {};
+      if (typeof body.enabled === "boolean") patch.enabled = body.enabled;
+      if (body.source === "auto" || body.source === "hana" || body.source === "custom") patch.source = body.source;
+      if (typeof body.providerId === "string") patch.providerId = body.providerId;
+      if (typeof body.model === "string") patch.model = body.model;
+      if (body.protocol === "t2a" || body.protocol === "chat") patch.protocol = body.protocol;
+      if (typeof body.groupId === "string") patch.groupId = body.groupId.trim();
+      if (typeof body.baseUrl === "string") patch.baseUrl = body.baseUrl.trim();
+      if (body.speed !== undefined && body.speed !== "") patch.speed = clampNum(body.speed, 0.5, 2, 1);
+      if (body.vol !== undefined && body.vol !== "") patch.vol = clampNum(body.vol, 0.1, 2, 1);
+      if (body.pitch !== undefined && body.pitch !== "") patch.pitch = clampNum(body.pitch, -12, 12, 0);
+      if (body.scope === "whole" || body.scope === "quoted") patch.scope = body.scope;
+      if (body.maxLen !== undefined && body.maxLen !== "") patch.maxLen = Math.round(clampNum(body.maxLen, 20, 10000, 800));
+      const keyErr = checkTtsKey(body);
+      if (keyErr) return json({ ok: false, error: keyErr }, 400);
+      if (body.clearApiKey === true) {
+        patch.apiKey = "";
+      } else if (typeof body.apiKey === "string" && body.apiKey && body.apiKey !== "********") {
+        patch.apiKey = await protectKey(body.apiKey);
+      }
+      await updateTtsConfig(dataDir, patch);
+      return json({ ok: true, message: "已保存" });
+    } catch (err) {
+      return json({ ok: false, error: redactSecrets(err?.message || "保存失败") }, 400);
+    }
+  });
+
+  // ─── 试听语音（支持未保存的临时配置，key 从表单来；不落盘） ───
+  app.post("/api/tts/test", async (c) => {
+    try {
+      const body = await c.req.json().catch(() => ({}));
+      const cur = getConfig(dataDir);
+      const tts = { ...(cur.tts || {}) };
+      if (body.source === "auto" || body.source === "hana" || body.source === "custom") tts.source = body.source;
+      if (typeof body.providerId === "string") tts.providerId = body.providerId;
+      if (typeof body.model === "string") tts.model = body.model;
+      if (body.protocol === "t2a" || body.protocol === "chat") tts.protocol = body.protocol;
+      if (typeof body.apiKey === "string" && body.apiKey && body.apiKey !== "********") {
+        // 试听配置只在内存里使用，不能为了测试把 Key 写入 data.json。
+        tts.apiKey = body.apiKey;
+      }
+      if (typeof body.groupId === "string" && body.groupId.trim()) tts.groupId = body.groupId.trim();
+      if (typeof body.baseUrl === "string" && body.baseUrl.trim()) tts.baseUrl = body.baseUrl.trim();
+      if (typeof body.voiceId === "string") tts.voiceId = body.voiceId.trim();
+      if (body.speed !== undefined && body.speed !== "") tts.speed = clampNum(body.speed, 0.5, 2, 1);
+      if (body.vol !== undefined && body.vol !== "") tts.vol = clampNum(body.vol, 0.1, 2, 1);
+      if (body.pitch !== undefined && body.pitch !== "") tts.pitch = clampNum(body.pitch, -12, 12, 0);
+      const keyErr = checkTtsKey(body);
+      if (keyErr) return json({ ok: false, error: keyErr }, 400);
+      // 试听文案跟着助手名走（2026-08-20）：助手专属试听传了 agentName 就用它的名字，普通试听保持默认
+      const previewName = typeof body.agentName === "string" && body.agentName.trim()
+        ? body.agentName.trim()
+        : "小花";
+      const { audio, format } = await synthesizeSpeech(tts, `你好呀，我是${previewName}。这是解语花的语音朗读试听，这个声音你还满意吗？`);
+      if (body.play === false) {
+        return json({ ok: true, playing: false, message: "模型连接正常" });
+      }
+      // 前端 webview 不能直接播音频（autoplay 受限，实机踩坑），改为后端写临时文件 + 系统播放
+      const tmpDir = path.join(dataDir, "tts-tmp");
+      fs.mkdirSync(tmpDir, { recursive: true });
+      // 清掉上一次试听残留（没播完就被替换的旧文件）
+      try {
+        for (const f of fs.readdirSync(tmpDir)) {
+          if (f.startsWith("preview_")) {
+            try { fs.unlinkSync(path.join(tmpDir, f)); } catch {}
+          }
+        }
+      } catch {}
+      const ext = format === "wav" ? "wav" : "mp3";
+      const file = path.join(tmpDir, `preview_${Date.now()}.${ext}`);
+      fs.writeFileSync(file, Buffer.from(audio, "base64"));
+      playAudioFile(file, ext).finally(() => {
+        try { fs.unlinkSync(file); } catch {}
+      });
+      return json({ ok: true, playing: true, message: "正在播放，听～" });
+    } catch (err) {
+      return json({ ok: false, error: redactSecrets(err?.message || "试听失败") });
+    }
+  });
+
+  // ─── Hana 语音模型候选（设置页下拉用，不含 key） + 音色列表 ───
+  app.get("/api/tts/candidates", (c) => {
+    return json({ ok: true, candidates: listTtsCandidates() });
+  });
+  app.get("/api/tts/voices", (c) => {
+    const protocol = String(c.req.query("protocol") || "") === "t2a" ? "t2a" : "chat";
+    return json({ ok: true, voices: voicesForProtocol(protocol) });
+  });
+
+  // ─── 助手专属配音：列表按需扫描，音色覆盖单独即时保存 ───
+  app.get("/api/tts/agents", (c) => {
+    const cfg = getConfig(dataDir);
+    const voiceByAgent = cfg.tts?.voiceByAgent || {};
+    return json({
+      ok: true,
+      agents: listAgents().map((agent) => ({
+        id: agent.id,
+        name: agent.name,
+        voiceId: typeof voiceByAgent[agent.id] === "string" ? voiceByAgent[agent.id] : "",
+      })),
+    });
+  });
+
+  app.post("/api/tts/agent-voice", async (c) => {
+    try {
+      const body = await c.req.json().catch(() => ({}));
+      const agentId = typeof body.agentId === "string" ? body.agentId.trim() : "";
+      const voiceId = typeof body.voiceId === "string" ? body.voiceId.trim() : "";
+      if (!agentId || agentId.length > 120) return json({ ok: false, error: "助手信息不完整" }, 400);
+      if (voiceId.length > 200) return json({ ok: false, error: "音色 id 太长了" }, 400);
+      if (voiceId && !listAgents().some((agent) => agent.id === agentId)) {
+        return json({ ok: false, error: "这位助手已经不存在了，先刷新列表" }, 400);
+      }
+      const tts = await updateTtsConfig(dataDir, (current) => {
+        const voiceByAgent = { ...(current.voiceByAgent || {}) };
+        if (voiceId) voiceByAgent[agentId] = voiceId;
+        else delete voiceByAgent[agentId];
+        return { voiceByAgent };
+      });
+      return json({ ok: true, agentId, voiceId: tts.voiceByAgent?.[agentId] || "", message: "已保存" });
+    } catch (err) {
+      return json({ ok: false, error: redactSecrets(err?.message || "保存专属音色失败") }, 400);
+    }
+  });
+
+  // ─── 朗读收藏：列表（含按助手分组）/ 删除 / 试听（本地已存音频，不重新合成） ───
+  app.get("/api/tts/favorites", (c) => {
+    const items = listFavorites(dataDir);
+    const groups = groupFavorites(items, new Map(listAgents().map((a) => [a.id, a.name])));
+    return json({ ok: true, items, groups });
+  });
+  app.post("/api/tts/favorites/delete", async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+    const id = typeof body.id === "string" ? body.id : "";
+    if (!id) return json({ ok: false, error: "缺收藏 id" }, 400);
+    return json({ ok: deleteFavorite(dataDir, id), message: "已删除" });
+  });
+  app.post("/api/tts/favorites/play", async (c) => {
+    try {
+      const body = await c.req.json().catch(() => ({}));
+      const id = typeof body.id === "string" ? body.id : "";
+      const file = id ? favoriteFile(dataDir, id) : null;
+      if (!file) return json({ ok: false, error: "收藏文件不存在" }, 404);
+      const it = listFavorites(dataDir).find((x) => x.id === id);
+      const ext = it && it.format === "wav" ? "wav" : "mp3";
+      playAudioFile(file, ext).catch(() => {});
+      return json({ ok: true, playing: true, message: "正在播放" });
+    } catch (err) {
+      return json({ ok: false, error: redactSecrets(err?.message || "播放失败") }, 400);
+    }
+  });
+
   // ─── 检查更新（分享版标配） ───
   const GITHUB_REPO = "moononnn/hanako-jieyuhua";  app.get("/api/check-update", async (c) => {
     try {
@@ -336,11 +537,11 @@ export default function registerPluginApiRoutes(app, ctx) {
   //  解语花悬浮球 — 启动 / 停止 / 状态 / 依赖检查
   // ────────────────────────────────────────────
   app.post("/api/ball/start", async (c) => {
-    const res = startZhujian(ctx);
-    return json(res, res.ok ? 200 : 400);
+    const res = await startZhujian(ctx);
+    return json(res, res.ok ? 200 : (res.status || 400));
   });
   app.post("/api/ball/stop", async (c) => {
-    const res = stopZhujian();
+    const res = await stopZhujian();
     return json(res, res.ok ? 200 : 400);
   });
   app.get("/api/ball/status", async (c) => {
@@ -348,6 +549,22 @@ export default function registerPluginApiRoutes(app, ctx) {
     const deps = await checkZhujianDeps();
     return json({ ...st, ...deps });
   });
+  // 半自动启动状态（消费式读取：dismissed 读一次即清除；Hana 重启内存重置）
+  app.get("/api/ball/autoboot", async (c) => {
+    const st = getZhujianState();
+    const dismissed = consumeZhujianDismissed();
+    const deps = await checkZhujianDeps();
+    return json({ ok: true, running: st.running, dismissed, pyQtOk: !!deps.pyQtOk });
+  });
+}
+
+function extractModelText(result) {
+  if (typeof result === "string") return result;
+  const value = result?.text ?? result?.content ?? result?.output ?? "";
+  if (Array.isArray(value)) {
+    return value.map((part) => typeof part === "string" ? part : (part?.text || part?.content || "")).join("");
+  }
+  return String(value || "");
 }
 
 function testPrompt(count) {
@@ -358,6 +575,19 @@ function testPrompt(count) {
     "必须是用户的第一人称口吻（「我」），对助手说话，每条 5~20 个字，口语化，",
     "只输出 JSON 字符串数组，不要任何其他文字。"
   ].join("");
+}
+
+// MiniMax 语音（t2a）认两种 Key：sk-api- 的 API Key（按量计费）和 sk-cp- 的订阅 Key（走订阅套餐额度）。
+// 官方 mmx CLI 就是拿订阅 Key 直连 t2a_v2（2026-08-19 实测 200 成功），此前「只认 sk-api-」的拦截是误判，已放开。
+// chat（OpenAI 兼容，如 MiMo）各家 key 前缀不同，不做前缀校验（分享版通用）。
+function checkTtsKey(body) {
+  const protocol = body.protocol === "t2a" ? "t2a" : body.protocol === "chat" ? "chat" : null;
+  const key = typeof body.apiKey === "string" ? body.apiKey : "";
+  if (!key || key === "********") return "";
+  if (protocol !== "t2a") return "";
+  if (/^sk-api-/i.test(key)) return "";
+  if (/^sk-cp-/i.test(key)) return "";
+  return "MiniMax 语音接口认两种 Key：sk-api- 开头的 API Key（按量计费）或 sk-cp- 开头的订阅 Key（走订阅套餐额度）。你填的这个开头不太对，检查一下。";
 }
 
 

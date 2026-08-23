@@ -44,7 +44,7 @@ fs.writeFileSync(
   "utf-8"
 );
 
-const { agentDisplayName } = await import("../lib/session.js");
+const { agentDisplayName, listAgents } = await import("../lib/session.js");
 
 test("agentDisplayName 读 config.yaml 的 agent.name", () => {
   assert.equal(agentDisplayName("hanako"), "小花");
@@ -68,4 +68,10 @@ test("agentDisplayName 读不到配置时回退 agentId", () => {
 
 test("agentDisplayName 空值返回空串", () => {
   assert.equal(agentDisplayName(""), "");
+});
+
+test("listAgents 刷新时扫描助手目录并返回显示名", () => {
+  const list = listAgents();
+  assert.deepEqual(list.map((item) => item.id), ["distract", "hanako", "plain", "quoted"]);
+  assert.equal(list.find((item) => item.id === "hanako").name, "小花");
 });

@@ -9,17 +9,29 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { getConfig, loadData } from "../lib/data.js";
+import { maskKey, getStorageMode } from "../lib/crypto.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+function htmlNoStore(body) {
+  return new Response(body, {
+    status: 200,
+    headers: {
+      "Content-Type": "text/html; charset=UTF-8",
+      "Cache-Control": "no-store, no-cache, must-revalidate",
+      Pragma: "no-cache",
+    },
+  });
+}
 
 export default function registerPluginUiRoutes(app, ctx) {
   const dataDir = ctx.dataDir;
 
   // ─── 推荐卡片页 ───
-  app.get("/suggest", (c) => c.html(renderSuggestPage(c, ctx, dataDir)));
+  app.get("/suggest", (c) => htmlNoStore(renderSuggestPage(c, ctx, dataDir)));
 
   // ─── 设置页 ───
-  app.get("/settings", (c) => c.html(renderSettingsPage(c, ctx, dataDir)));
+  app.get("/settings", (c) => htmlNoStore(renderSettingsPage(c, ctx, dataDir)));
 }
 
 // ════════════════════════════════════════════
@@ -93,6 +105,33 @@ ${hanaCss ? `<link rel="stylesheet" href="${escapeAttr(hanaCss)}">` : ""}
   }
   .dgh-hint {
     font-size: 11px; color: var(--dgh-sub);
+  }
+  /* Key 就地提示（2026-08-19 分享版）：粘进 sk-cp- 订阅 Key 马上提醒，不等点试听 */
+  .dgh-key-tip {
+    font-size: 11px; line-height: 1.5; margin-top: 4px;
+    border-radius: 8px; padding: 4px 8px;
+    background: #fdf3df; color: #8a6d1c;
+  }
+  .dgh-key-tip.ok {
+    background: var(--dgh-accent-light); color: var(--dgh-ok);
+  }
+  /* 我的收藏：朗读收藏条（手帐卡） */
+  .dgh-fav-item {
+    background: var(--dgh-paper); border: 1px dashed var(--dgh-rule);
+    border-radius: 12px; padding: 6px 9px; margin-top: 6px;
+  }
+  .dgh-fav-text { font-size: 12px; color: var(--dgh-ink); line-height: 1.5; word-break: break-all; }
+  .dgh-fav-meta { font-size: 10px; color: var(--dgh-sub); margin-top: 2px; }
+  .dgh-fav-actions { margin-top: 5px; display: flex; gap: 6px; }
+  /* 语音收藏弹窗：按助手分组 */
+  .dgh-fav-groups { margin-top: 10px; max-height: 46vh; overflow-y: auto; padding-right: 2px; }
+  .dgh-fav-group { margin-bottom: 12px; }
+  .dgh-fav-group-title { font-size: 13px; font-weight: 700; color: var(--dgh-ink); margin-bottom: 4px; }
+  .dgh-fav-group-count { font-size: 11px; color: var(--dgh-sub); font-weight: 400; margin-left: 6px; }
+  .dgh-fav-group-empty { font-size: 12px; color: var(--dgh-sub); padding: 10px 2px; line-height: 1.6; }
+  body[data-hana-theme="midnight"] .dgh-key-tip,
+  body[data-hana-theme="midnight-contrast"] .dgh-key-tip {
+    background: rgba(240, 200, 120, 0.12); color: #e8c878;
   }
   /* 高度策略（2026-08-06 定稿）：卡片固定最小高度，容器高度跟随条数自适应上报宿主。
      宿主对 card 槽位接受 >=30px 的高度上报并直接设置 iframe 高度（上限 600），
@@ -170,7 +209,17 @@ function renderSettingsPage(c, ctx, dataDir) {
 
   const model = cfg.model || {};
   const custom = model.custom || {};
-  const apiKeyMasked = custom.apiKey ? "********" : "";
+  const modelKeyMode = getStorageMode(custom.apiKey);
+  const apiKeyMasked = maskKey(custom.apiKey);
+  const tts = cfg.tts || {};
+  const ttsKeyMode = getStorageMode(tts.apiKey);
+  const ttsKeyStatus = ttsKeyMode === "dpapi"
+    ? "系统加密保存"
+    : ttsKeyMode === "legacy"
+      ? "旧版保护，保存后自动升级"
+      : ttsKeyMode === "plain"
+        ? "明文保存（仅作兼容兜底）"
+        : "";
 
   const clientJs = buildSettingsClientJs(apiBase, {
     version,
@@ -185,8 +234,28 @@ function renderSettingsPage(c, ctx, dataDir) {
     modelId: model.modelId,
     customBaseUrl: escapeAttr(custom.baseUrl || ""),
     customApiKey: apiKeyMasked,
+    customKeyMode: modelKeyMode,
     customModel: escapeAttr(custom.model || ""),
-    customApi: custom.api || "openai-completions"
+    customApi: custom.api || "openai-completions",
+    tts: {
+      enabled: !!(cfg.tts && cfg.tts.enabled),
+      source: (cfg.tts && cfg.tts.source) || "auto",
+      providerId: escapeAttr((cfg.tts && cfg.tts.providerId) || ""),
+      model: escapeAttr((cfg.tts && cfg.tts.model) || ""),
+      protocol: (cfg.tts && cfg.tts.protocol) === "t2a" ? "t2a" : "chat",
+      groupId: escapeAttr((cfg.tts && cfg.tts.groupId) || ""),
+      baseUrl: escapeAttr((cfg.tts && cfg.tts.baseUrl) || ""),
+      voiceId: escapeAttr((cfg.tts && cfg.tts.voiceId) || ""),
+      voiceByAgent: (cfg.tts && cfg.tts.voiceByAgent) || {},
+      speed: String((cfg.tts && cfg.tts.speed) || 1),
+      vol: String((cfg.tts && cfg.tts.vol) || 1),
+      pitch: String((cfg.tts && cfg.tts.pitch) || 0),
+      scope: (cfg.tts && cfg.tts.scope) === "quoted" ? "quoted" : "whole",
+      maxLen: String((cfg.tts && cfg.tts.maxLen) || 800),
+      apiKeyMasked: maskKey(cfg.tts && cfg.tts.apiKey),
+      apiKeyMode: ttsKeyMode,
+      apiKeyHint: ttsKeyStatus
+    }
   });
 
   const radio = (name, value, checked, label, desc) => `
@@ -354,6 +423,65 @@ ${hanaCss ? `<link rel="stylesheet" href="${escapeAttr(hanaCss)}">` : ""}
     flex-shrink: 0;
   }
   .dgh-modal-foot .dgh-msg { flex: 1; margin: 0; min-height: 0; }
+  /* 语音收藏弹窗：按助手分组（2026-08-23 手帐化） */
+  #dgh-fav-modal .dgh-modal-box { border: none; box-shadow: 0 12px 40px rgba(45, 58, 53, .18); }
+  .dgh-fav-groups { margin-top: 8px; max-height: 46vh; overflow-y: auto; padding-right: 2px; }
+  .dgh-fav-group { margin-bottom: 14px; }
+  .dgh-fav-group-head { display: flex; align-items: center; gap: 8px; }
+  .dgh-fav-avatar {
+    width: 24px; height: 24px; border-radius: 999px; flex-shrink: 0;
+    background: var(--dgh-accent-light); color: var(--dgh-accent-deep);
+    border: 1px solid var(--dgh-accent);
+    font-size: 12px; font-weight: 700;
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  .dgh-fav-group.other .dgh-fav-avatar {
+    background: var(--dgh-pink-light); color: var(--dgh-pink);
+    border-color: var(--dgh-pink);
+  }
+  .dgh-fav-group-title { font-size: 13px; font-weight: 700; color: var(--dgh-ink); }
+  .dgh-fav-group-count {
+    font-size: 10px; color: var(--dgh-accent-deep); background: var(--dgh-accent-light);
+    border-radius: 999px; padding: 1px 8px;
+  }
+  .dgh-fav-group.other .dgh-fav-group-count { color: var(--dgh-pink); background: var(--dgh-pink-light); }
+  .dgh-fav-group-note { font-size: 10px; color: var(--dgh-sub); margin: 3px 0 0 32px; line-height: 1.5; }
+  .dgh-fav-group-empty { font-size: 12px; color: var(--dgh-sub); padding: 14px 4px; line-height: 1.7; text-align: center; }
+  /* 收藏条目：手帐卡，结构分隔用细实线 */
+  .dgh-fav-item {
+    background: var(--dgh-paper);
+    border: 1px solid var(--dgh-rule);
+    border-radius: 14px; padding: 8px 11px; margin-top: 8px;
+    box-shadow: 0 2px 8px rgba(74, 146, 119, .06);
+    transition: transform .12s ease, border-color .12s ease, box-shadow .12s ease;
+  }
+  .dgh-fav-item:hover {
+    border-color: var(--dgh-accent);
+    box-shadow: 0 4px 12px rgba(74, 146, 119, .12);
+    transform: translateY(-1px);
+  }
+  .dgh-fav-text { font-size: 12px; color: var(--dgh-ink); line-height: 1.55; word-break: break-all; }
+  .dgh-fav-meta { font-size: 10px; color: var(--dgh-sub); margin-top: 4px; }
+  .dgh-fav-actions { margin-top: 7px; display: flex; gap: 8px; }
+  .dgh-fav-btn {
+    font-family: inherit; font-size: 11px; line-height: 1;
+    border-radius: 999px; padding: 5px 12px; cursor: pointer;
+    transition: all .15s ease;
+  }
+  .dgh-fav-btn.play {
+    color: var(--dgh-accent-deep); background: var(--dgh-accent-light);
+    border: 1px solid var(--dgh-accent);
+  }
+  .dgh-fav-btn.play:hover { background: var(--dgh-accent); color: #fff; }
+  .dgh-fav-btn.del {
+    color: var(--dgh-pink); background: transparent;
+    border: 1px solid var(--dgh-pink);
+  }
+  .dgh-fav-btn.del:hover { background: var(--dgh-pink-light); }
+  .dgh-fav-btn.del.confirm {
+    background: var(--dgh-pink); border-color: var(--dgh-pink); color: #fff;
+  }
+  .dgh-fav-btn[disabled] { opacity: .55; cursor: default; }
   /* toast */
   .dgh-toast {
     position: fixed; left: 50%; top: 18px; transform: translateX(-50%);
@@ -412,6 +540,40 @@ ${hanaCss ? `<link rel="stylesheet" href="${escapeAttr(hanaCss)}">` : ""}
   .dgh-change { font-size: 12px; padding: 4px 0; }
   .dgh-change-old { color: var(--dgh-sub); text-decoration: line-through; }
   .dgh-change-new { color: var(--dgh-ink); }
+  .dgh-tts-block {
+    margin-top: 12px; padding: 10px;
+    background: var(--dgh-bg);
+    border: 1px dashed var(--dgh-rule);
+    border-radius: 12px;
+  }
+  .dgh-tts-block-title { font-size: 13px; font-weight: 600; margin-bottom: 5px; }
+  /* 助手专属配音：每行选音色 + 试听，清除通过“跟随模型默认音色”完成 */
+  .dgh-tts-agent-list {
+    display: flex; flex-direction: column; gap: 6px;
+    max-height: 260px; overflow-y: auto; margin-top: 8px;
+    padding-right: 2px;
+  }
+  .dgh-tts-agent-row {
+    display: grid; grid-template-columns: minmax(76px, .7fr) minmax(150px, 1.3fr) auto;
+    gap: 6px; align-items: start;
+    padding: 7px 8px;
+    background: var(--dgh-paper);
+    border: 1px dashed var(--dgh-rule);
+    border-radius: 10px;
+  }
+  .dgh-tts-agent-name { font-size: 13px; line-height: 30px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dgh-tts-agent-control { min-width: 0; }
+  .dgh-tts-agent-select { min-width: 0; }
+  .dgh-tts-agent-custom { margin-top: 5px; }
+  .dgh-tts-agent-action { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; }
+  .dgh-tts-agent-test { padding: 6px 10px; white-space: nowrap; }
+  .dgh-tts-agent-status { max-width: 92px; font-size: 10px; color: var(--dgh-sub); text-align: right; }
+  .dgh-tts-agent-empty { font-size: 12px; color: var(--dgh-sub); padding: 8px 2px; }
+  @media (max-width: 430px) {
+    .dgh-tts-agent-row { grid-template-columns: 1fr auto; }
+    .dgh-tts-agent-control { grid-column: 1 / -1; grid-row: 2; }
+    .dgh-tts-agent-action { grid-column: 2; grid-row: 1; }
+  }
 </style>
 </head>
 <body data-hana-theme="${escapeAttr(theme)}" data-surface="page">
@@ -420,6 +582,8 @@ ${hanaCss ? `<link rel="stylesheet" href="${escapeAttr(hanaCss)}">` : ""}
     <span class="dgh-ver">v${escapeHtml(version)}</span>
     <span class="spacer"></span>
     <button class="dgh-top-btn" id="dgh-model-open" type="button" title="生成推荐的模型配置">模型设置</button>
+    <button class="dgh-top-btn" id="dgh-tts-open" type="button" title="把回复朗读出来">语音朗读</button>
+    <button class="dgh-top-btn" id="dgh-fav-open" type="button" title="听收藏过的语音">语音收藏</button>
     <button class="dgh-top-btn" id="dgh-update" type="button" title="检查 GitHub 上的新版本">检查更新</button>
     <button class="dgh-top-btn" id="dgh-feedback" type="button" title="遇到 bug 或有建议，来 GitHub 提 issue">反馈</button>
   </div>
@@ -448,7 +612,7 @@ ${hanaCss ? `<link rel="stylesheet" href="${escapeAttr(hanaCss)}">` : ""}
     </div>
   </div>
 
-  <div class="dgh-card">
+  <div class="dgh-card${cfg.presentation !== "ball" && cfg.presentation !== "off" ? "" : " dgh-hidden"}" id="dgh-mode-card">
     <div class="dgh-card-title">什么时候出推荐</div>
     ${radio("mode", "always", cfg.mode === "always", "每次都推荐", "每轮回复都带推荐，方便稳定，多花一点模型费用")}
     ${radio("mode", "auto", cfg.mode === "auto", "看情况推荐", "助手觉得这轮聊完你可能想接话时才出，不打扰；但出不出看模型的自觉，偶尔可能整轮都没卡")}
@@ -518,7 +682,9 @@ ${hanaCss ? `<link rel="stylesheet" href="${escapeAttr(hanaCss)}">` : ""}
           <label for="dgh-custom-url">API 地址</label>
           <input class="dgh-input" id="dgh-custom-url" placeholder="https://api.example.com/v1" value="${escapeAttr(custom.baseUrl || "")}">
           <label for="dgh-custom-key" style="margin-top:8px">API 密钥</label>
-          <input class="dgh-input" id="dgh-custom-key" type="password" placeholder="sk-..." value="${escapeAttr(apiKeyMasked)}">
+          <input class="dgh-input" id="dgh-custom-key" type="password" placeholder="${apiKeyMasked ? "留空 = 用已保存的 Key；换 Key 直接贴新的" : "sk-..."}" value="">
+          <div class="dgh-sub">${apiKeyMasked ? `已保存（${escapeHtml(modelKeyMode === "dpapi" ? "系统加密" : modelKeyMode === "legacy" ? "旧版保护" : "明文兼容保存")}），留空不会覆盖` : "Key 只保存在本机插件数据里"}</div>
+          <button class="dgh-btn ghost" id="dgh-custom-key-clear" type="button" style="margin-top:6px"${apiKeyMasked ? "" : " disabled"}>清除已保存的 Key</button>
           <label for="dgh-custom-model" style="margin-top:8px">模型名</label>
           <input class="dgh-input" id="dgh-custom-model" placeholder="例如 gpt-4o-mini" value="${escapeAttr(custom.model || "")}">
         </div>
@@ -527,6 +693,111 @@ ${hanaCss ? `<link rel="stylesheet" href="${escapeAttr(hanaCss)}">` : ""}
         <button class="dgh-btn ghost" id="dgh-test" type="button">测试一下</button>
         <button class="dgh-btn" id="dgh-save" type="button">保存</button>
         <div class="dgh-msg" id="dgh-msg"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 语音朗读设置弹窗 -->
+  <div class="dgh-modal-overlay dgh-hidden" id="dgh-tts-modal">
+    <div class="dgh-modal-box">
+      <div class="dgh-modal-head">
+        <h2>语音朗读</h2>
+        <button class="dgh-modal-close" id="dgh-tts-modal-close" type="button">✕</button>
+      </div>
+      <div class="dgh-modal-body">
+        <div class="dgh-sub">打开后，悬浮球面板会出现「念给我听」按钮，点一下就把当前助手最近一条回复用语音读出来。</div>
+        ${radio("tts_enabled", "on", tts.enabled, "开启语音朗读", "悬浮球面板显示「念给我听」按钮")}
+        ${radio("tts_enabled", "off", !tts.enabled, "关闭", "不显示按钮，不花语音额度")}
+
+        <div class="dgh-tts-block" style="margin-top:10px">
+          <div class="dgh-tts-block-title">语音模型</div>
+          <div class="dgh-sub">先在这里配好模型，下面再给每位助手选音色和试听。</div>
+          ${radio("tts_source", "auto", tts.source !== "hana" && tts.source !== "custom", "自动", "自动用 Hana 里已配置的语音合成模型，不用配任何东西")}
+          ${radio("tts_source", "hana", tts.source === "hana", "手动选", "从 Hana 已配置的语音模型里挑一个")}
+          ${radio("tts_source", "custom", tts.source === "custom", "自定义", "自己填接口，支持 MiniMax 和 OpenAI 兼容聊天（如 MiMo）")}
+
+        <div class="dgh-field dgh-hidden" id="dgh-tts-auto-box">
+          <div class="dgh-sub" id="dgh-tts-auto-info">正在查找 Hana 里的语音模型…</div>
+        </div>
+
+        <div class="dgh-field dgh-hidden" id="dgh-tts-hana-box">
+          <label for="dgh-tts-candidate">语音模型</label>
+          <select class="dgh-select" id="dgh-tts-candidate"><option value="">（加载中…）</option></select>
+          <div class="dgh-sub">Hana 里没有合适的？去 Hana 的模型设置加一个 TTS 模型（名字带 tts/speech），或选自定义</div>
+        </div>
+
+        <div class="dgh-field dgh-hidden" id="dgh-tts-custom-box">
+          <label for="dgh-tts-protocol">接口类型</label>
+          <select class="dgh-select" id="dgh-tts-protocol">
+            <option value="t2a"${tts.protocol === "t2a" ? " selected" : ""}>MiniMax（t2a_v2）</option>
+            <option value="chat"${tts.protocol === "chat" ? " selected" : ""}>OpenAI 兼容聊天（MiMo 等）</option>
+          </select>
+          <div id="dgh-tts-t2a-fields">
+            <label for="dgh-tts-key" style="margin-top:8px">API Key <span class="dgh-hint">（留空 = 用已保存的）</span></label>
+            <input class="dgh-input" id="dgh-tts-key" type="password" placeholder="${ttsKeyStatus ? "留空 = 用已保存的 Key；换 Key 直接贴新的" : "粘贴 sk-api- 或 sk-cp- 开头的 Key（开放平台「接口密钥」页）"}" value="" autocomplete="off">
+            <div class="dgh-sub">${ttsKeyStatus ? `已保存（${escapeHtml(ttsKeyStatus)}），去助手配音里试听就行。` : "两种 Key 都能用：sk-api- 开头 API Key 按量计费；sk-cp- 开头订阅 Key 走订阅套餐额度（不扣 API 余额）"}</div>
+            <button class="dgh-btn ghost" id="dgh-tts-key-clear" type="button" style="margin-top:6px"${tts.apiKey ? "" : " disabled"}>清除已保存的 Key</button>
+            <div class="dgh-key-tip dgh-hidden" id="dgh-tts-key-warn"></div>
+            <label for="dgh-tts-group" style="margin-top:8px">GroupId（必填）</label>
+            <input class="dgh-input" id="dgh-tts-group" placeholder="MiniMax 控制台里的团队 ID" value="${tts.groupId}">
+          </div>
+          <div id="dgh-tts-chat-fields" class="dgh-hidden">
+            <label for="dgh-tts-key2" style="margin-top:8px">API Key <span class="dgh-hint">（留空 = 用已保存的）</span></label>
+            <input class="dgh-input" id="dgh-tts-key2" type="password" placeholder="${ttsKeyStatus ? "留空 = 用已保存的 Key；换 Key 直接贴新的" : "粘贴该语音模型的 API Key"}" value="" autocomplete="off">
+            <div class="dgh-sub">${ttsKeyStatus ? `已保存（${escapeHtml(ttsKeyStatus)}），去助手配音里试听就行` : "填该语音模型的 API Key（各家前缀没统一格式，填你实际的）"}</div>
+            <button class="dgh-btn ghost" id="dgh-tts-key2-clear" type="button" style="margin-top:6px"${tts.apiKey ? "" : " disabled"}>清除已保存的 Key</button>
+            <label for="dgh-tts-custom-model" style="margin-top:8px">模型名</label>
+            <input class="dgh-input" id="dgh-tts-custom-model" placeholder="例如 mimo-v2.5-tts" value="${tts.model}">
+          </div>
+          <label for="dgh-tts-url" style="margin-top:8px">接口地址（可留空）</label>
+          <input class="dgh-input" id="dgh-tts-url" placeholder="MiniMax 留空用 https://api.minimaxi.com" value="${tts.baseUrl}">
+        </div>
+
+        </div>
+
+        <div class="dgh-tts-block">
+          <div class="dgh-tts-block-title">助手配音</div>
+          <div class="dgh-sub">先保存上面的模型；刷新后，每位助手都能单独选音色和试听。选“跟随模型默认音色”就不设置专属音色。</div>
+          <div class="dgh-row" style="margin-top:7px">
+            <button class="dgh-btn ghost" id="dgh-tts-refresh-agents" type="button">刷新模型和音色</button>
+            <span class="dgh-hint" id="dgh-tts-agent-status"></span>
+          </div>
+          <div class="dgh-tts-agent-list" id="dgh-tts-agent-list">
+            <div class="dgh-tts-agent-empty">打开这里时会读取 Hana 里的助手和音色…</div>
+          </div>
+        </div>
+
+        <div class="dgh-tts-block">
+          <div class="dgh-tts-block-title">朗读偏好</div>
+          <label for="dgh-tts-speed">语速</label>
+          <select class="dgh-select" id="dgh-tts-speed"></select>
+          <div class="dgh-sub" style="margin-top:10px">朗读内容</div>
+          ${radio("tts_scope", "whole", tts.scope === "whole", "整条回复", "把回复全文念出来")}
+          ${radio("tts_scope", "quoted", tts.scope === "quoted", "只读引号里的内容", "只念「」『』“”里的台词，适合角色扮演；没有引号时读整条")}
+          <div class="dgh-field dgh-hidden" id="dgh-tts-fav-box" style="margin-top:10px">
+            <div class="dgh-sub" style="margin-top:10px">我的收藏 <span class="dgh-hint">（悬浮球朗读时点「♡ 收藏」存入；播放直接用存好的音频，不重新合成）</span></div>
+            <div id="dgh-tts-fav-list"></div>
+          </div>
+        </div>
+      </div>
+      <div class="dgh-modal-foot">
+        <button class="dgh-btn ghost" id="dgh-tts-test-model" type="button">测试模型连接</button>
+        <button class="dgh-btn" id="dgh-tts-save" type="button">保存设置</button>
+        <div class="dgh-msg" id="dgh-tts-msg"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 语音收藏弹窗 -->
+  <div class="dgh-modal-overlay dgh-hidden" id="dgh-fav-modal">
+    <div class="dgh-modal-box">
+      <div class="dgh-modal-head">
+        <h2>语音收藏</h2>
+        <button class="dgh-modal-close" id="dgh-fav-modal-close" type="button">✕</button>
+      </div>
+      <div class="dgh-modal-body">
+        <div class="dgh-sub">朗读时点「♡ 收藏」的语音都在这里，按助手分好了类。播放直接用存好的音频，不重新合成。</div>
+        <div class="dgh-fav-groups" id="dgh-fav-groups"></div>
       </div>
     </div>
   </div>
@@ -548,8 +819,10 @@ function buildClientJs(apiBase, rid, action) {
   var API = ${JSON.stringify(apiBase)};
   var RID = ${JSON.stringify(rid)};
   var ACTION = ${JSON.stringify(action)}; // 服务端渲染的初始值，加载后会被实时配置覆盖
-  var TOKEN = new URLSearchParams(location.search).get("token") || "";
-  var HOST_ORIGIN = new URLSearchParams(location.search).get("hana-host-origin") || "*";
+  var PARAMS = new URLSearchParams(location.search);
+  var TOKEN = PARAMS.get("token") || "";
+  var SURFACE_SESSION = PARAMS.get("pluginSurfaceSession") || "";
+  var HOST_ORIGIN = PARAMS.get("hana-host-origin") || "*";
 
   window.parent.postMessage({ protocol: "hana.plugin.ui", version: 1, kind: "event", type: "hana.ready" }, "*");
 
@@ -597,8 +870,14 @@ function buildClientJs(apiBase, rid, action) {
     return u.pathname + u.search;
   }
 
+  function surfaceHeaders() {
+    var headers = {};
+    if (SURFACE_SESSION) headers["X-Hana-Plugin-Surface-Session"] = SURFACE_SESSION;
+    return headers;
+  }
+
   function apiGet(p) {
-    return fetch(apiUrl(p), { credentials: "same-origin" }).then(function(r){
+    return fetch(apiUrl(p), { credentials: "same-origin", headers: surfaceHeaders() }).then(function(r){
       if (!r.ok) throw new Error("HTTP " + r.status);
       return r.json();
     });
@@ -608,7 +887,7 @@ function buildClientJs(apiBase, rid, action) {
     return fetch(apiUrl(p), {
       method: "POST",
       credentials: "same-origin",
-      headers: { "Content-Type": "application/json" },
+      headers: Object.assign({ "Content-Type": "application/json" }, surfaceHeaders()),
       body: JSON.stringify(body || {})
     }).then(function(r){
       if (!r.ok) throw new Error("HTTP " + r.status);
@@ -761,10 +1040,18 @@ function buildClientJs(apiBase, rid, action) {
 //  设置页客户端 JS（内联）
 // ════════════════════════════════════════════
 function buildSettingsClientJs(apiBase, state) {
+  const safeState = JSON.stringify(state)
+    .replace(/</g, "\\u003c")
+    .replace(/>/g, "\\u003e")
+    .replace(/&/g, "\\u0026")
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
   return `(function(){
   var API = ${JSON.stringify(apiBase)};
-  var STATE = ${JSON.stringify(state)};
-  var TOKEN = new URLSearchParams(location.search).get("token") || "";
+  var STATE = ${safeState};
+  var PARAMS = new URLSearchParams(location.search);
+  var TOKEN = PARAMS.get("token") || "";
+  var SURFACE_SESSION = PARAMS.get("pluginSurfaceSession") || "";
 
   window.parent.postMessage({ protocol: "hana.plugin.ui", version: 1, kind: "event", type: "hana.ready" }, "*");
 
@@ -774,8 +1061,14 @@ function buildSettingsClientJs(apiBase, state) {
     return u.pathname + u.search;
   }
 
+  function surfaceHeaders() {
+    var headers = {};
+    if (SURFACE_SESSION) headers["X-Hana-Plugin-Surface-Session"] = SURFACE_SESSION;
+    return headers;
+  }
+
   function apiGet(p) {
-    return fetch(apiUrl(p), { credentials: "same-origin" }).then(function(r){
+    return fetch(apiUrl(p), { credentials: "same-origin", headers: surfaceHeaders() }).then(function(r){
       if (!r.ok) throw new Error("HTTP " + r.status);
       return r.json();
     });
@@ -785,11 +1078,18 @@ function buildSettingsClientJs(apiBase, state) {
     return fetch(apiUrl(p), {
       method: "POST",
       credentials: "same-origin",
-      headers: { "Content-Type": "application/json" },
+      headers: Object.assign({ "Content-Type": "application/json" }, surfaceHeaders()),
       body: JSON.stringify(body || {})
     }).then(function(r){
-      if (!r.ok) throw new Error("HTTP " + r.status);
-      return r.json();
+      return r.json().catch(function(){ return null; }).then(function(j){
+        if (!r.ok) {
+          // 后端错误详情优先（如 key 格式校验提示），避免只显示裸 HTTP 状态码
+          var err = new Error((j && j.error) || ("HTTP " + r.status));
+          err.status = r.status;
+          throw err;
+        }
+        return j;
+      });
     });
   }
 
@@ -988,6 +1288,14 @@ function buildSettingsClientJs(apiBase, state) {
     if (isBall) refreshBallStatus();
   }
 
+  // 「什么时候出推荐」只对回复卡片有效：选了解语花/关闭就藏起来
+  function syncModeCard() {
+    var card = $("dgh-mode-card");
+    if (!card) return;
+    var isCard = radioValue("presentation") === "card";
+    card.classList.toggle("dgh-hidden", !isCard);
+  }
+
   function refreshBallStatus() {
     var st = $("dgh-ball-status");
     var act = $("dgh-ball-activate");
@@ -1025,6 +1333,7 @@ function buildSettingsClientJs(apiBase, state) {
         }).catch(function(){ refreshBallStatus(); });
       }
       syncBallBox();
+      syncModeCard();
     });
   });
   var ballAct = $("dgh-ball-activate");
@@ -1043,6 +1352,28 @@ function buildSettingsClientJs(apiBase, state) {
     }).catch(function(){ showToast("停止失败", "err"); refreshBallStatus(); });
   });
   syncBallBox();
+  syncModeCard();
+
+  // ─── 打开插件页面自动启动解语花（半自动：仅解语花模式；手动关过则本次不再弹）───
+  function autoBootZhujian() {
+    if (radioValue("presentation") !== "ball") return; // 回复卡片/关闭模式不自动启动
+    apiGet("/ball/autoboot").then(function(st){
+      if (!st || !st.ok) return;
+      if (st.running) return; // 已经在跑不重复启动
+      if (st.dismissed) return; // 上次手动关过：本次打开页面不弹
+      if (!st.pyQtOk) {
+        showToast("解语花需要 Python + PyQt6，当前环境还不能加载它", "err");
+        return;
+      }
+      apiPost("/ball/start", {}).then(function(res){
+        if (res && res.ok) showToast("解语花已飘出");
+        else if (res && res.fusion) { /* 融合球在跑：不打扰，静默 */ }
+        else showToast(((res && res.error) || "解语花启动失败"), "err");
+        refreshBallStatus();
+      }).catch(function(){ showToast("解语花启动失败", "err"); refreshBallStatus(); });
+    }).catch(function(){ /* 查询失败不打扰 */ });
+  }
+  autoBootZhujian();
 
   document.querySelectorAll("input[name=mode]").forEach(function(r){
     r.addEventListener("change", function(){
@@ -1081,6 +1412,16 @@ function buildSettingsClientJs(apiBase, state) {
   });
 
   // 保存（弹窗内，只存模型配置） ──
+  var clearCustomKeyRequested = false;
+  var customKeyInput = $("dgh-custom-key");
+  if (customKeyInput) customKeyInput.addEventListener("input", function(){ clearCustomKeyRequested = false; });
+  var customKeyClear = $("dgh-custom-key-clear");
+  if (customKeyClear) customKeyClear.addEventListener("click", function(){
+    clearCustomKeyRequested = true;
+    if (customKeyInput) customKeyInput.value = "";
+    customKeyClear.disabled = true;
+    setMsg("已标记清除，点击保存后生效", false);
+  });
   $("dgh-save").addEventListener("click", function(){
     var body = {
       model: {
@@ -1090,6 +1431,7 @@ function buildSettingsClientJs(apiBase, state) {
         custom: {
           baseUrl: $("dgh-custom-url") ? $("dgh-custom-url").value.trim() : "",
           apiKey: $("dgh-custom-key") ? $("dgh-custom-key").value : "",
+          clearApiKey: clearCustomKeyRequested,
           model: $("dgh-custom-model") ? $("dgh-custom-model").value.trim() : ""
         }
       }
@@ -1099,8 +1441,10 @@ function buildSettingsClientJs(apiBase, state) {
       if (res && res.ok) {
         setMsg("已保存", true);
         if (body.model.custom.apiKey && body.model.custom.apiKey !== "********") {
-          $("dgh-custom-key").value = "********";
+          $("dgh-custom-key").value = "";
         }
+        clearCustomKeyRequested = false;
+        if (customKeyClear) customKeyClear.disabled = true;
         setTimeout(closeModelModal, 600);
       } else {
         setMsg((res && res.error) || "保存失败", false);
@@ -1134,6 +1478,659 @@ function buildSettingsClientJs(apiBase, state) {
       }
     }).catch(function(err){
       setMsg("测试失败：" + err.message, false);
+    });
+  });
+
+  // ── 语音朗读弹窗（三档来源：自动 / 手动选 / 自定义） ──
+  function ttsRadio(name) { return radioValue("tts_" + name); }
+  function ttsProtocol() {
+    var sel = $("dgh-tts-protocol");
+    return sel && sel.value === "t2a" ? "t2a" : "chat";
+  }
+  function syncTtsSourceBoxes(loadVoices) {
+    var src = ttsRadio("source") || "auto";
+    var autoBox = $("dgh-tts-auto-box");
+    var hanaBox = $("dgh-tts-hana-box");
+    var customBox = $("dgh-tts-custom-box");
+    if (autoBox) autoBox.classList.toggle("dgh-hidden", src !== "auto");
+    if (hanaBox) hanaBox.classList.toggle("dgh-hidden", src !== "hana");
+    if (customBox) customBox.classList.toggle("dgh-hidden", src !== "custom");
+    if (src === "custom") {
+      syncTtsProtocolFields(loadVoices);
+      return;
+    }
+    if (loadVoices !== false) loadTtsVoices(ttsVoiceProtocol()).catch(function(){});
+  }
+  function syncTtsProtocolFields(loadVoices) {
+    var proto = ttsProtocol();
+    var t2aFields = $("dgh-tts-t2a-fields");
+    var chatFields = $("dgh-tts-chat-fields");
+    if (t2aFields) t2aFields.classList.toggle("dgh-hidden", proto !== "t2a");
+    if (chatFields) chatFields.classList.toggle("dgh-hidden", proto !== "chat");
+    if (loadVoices !== false) loadTtsVoices(proto).catch(function(){});
+  }
+  var ttsAgents = [];
+  var ttsVoices = [];
+  var ttsVoicesProtocol = "";
+  var ttsVoiceSeq = 0;
+  var ttsAgentsSeq = 0;
+  function setTtsAgentListEnabled(enabled) {
+    var box = $("dgh-tts-agent-list");
+    if (!box) return;
+    var controls = box.querySelectorAll("select, input, button");
+    for (var i = 0; i < controls.length; i++) controls[i].disabled = !enabled;
+  }
+  function ttsVoiceProtocol() {
+    return ttsRadio("source") === "custom" ? ttsProtocol() : "chat";
+  }
+  function loadTtsVoices(proto) {
+    var protocol = proto === "t2a" ? "t2a" : "chat";
+    var requestSeq = ++ttsVoiceSeq;
+    var status = $("dgh-tts-agent-status");
+    if (status) status.textContent = "读取音色中…";
+    setTtsAgentListEnabled(false);
+    return apiGet("/tts/voices?protocol=" + encodeURIComponent(protocol)).then(function(res){
+      if (requestSeq !== ttsVoiceSeq) return { stale: true, voices: [] };
+      if (!res || !res.ok) throw new Error((res && res.error) || "读取音色列表失败");
+      ttsVoices = Array.isArray(res.voices) ? res.voices : [];
+      ttsVoicesProtocol = protocol;
+      if (ttsAgents.length) renderTtsAgentVoices(ttsAgents, ttsVoices);
+      return { stale: false, voices: ttsVoices };
+    }).catch(function(err){
+      if (requestSeq !== ttsVoiceSeq) return { stale: true, voices: [] };
+      if (status) status.textContent = "音色列表读取失败";
+      setTtsAgentListEnabled(false);
+      throw err;
+    });
+  }
+  function agentVoiceOptions(current, voices) {
+    var known = !current;
+    var html = '<option value=""' + (!current ? " selected" : "") + '>跟随模型默认音色</option>';
+    for (var i = 0; i < voices.length; i++) {
+      var v = voices[i];
+      if (!v || !v.id) continue;
+      if (v.id === current) known = true;
+      html += '<option value="' + escHtml(v.id) + '"' + (v.id === current ? " selected" : "") + '>' + escHtml(v.name || v.id) + "</option>";
+    }
+    html += '<option value="__custom__"' + (current && !known ? " selected" : "") + '>自定义…</option>';
+    return { html: html, custom: !!current && !known };
+  }
+  function renderTtsAgentVoices(agents, voices) {
+    var box = $("dgh-tts-agent-list");
+    if (!box) return;
+    var list = Array.isArray(agents) ? agents : [];
+    var voiceList = Array.isArray(voices) ? voices : [];
+    if (!list.length) {
+      box.innerHTML = '<div class="dgh-tts-agent-empty">还没有找到可配置的助手。</div>';
+      setTtsAgentListEnabled(false);
+      return;
+    }
+    var html = "";
+    for (var i = 0; i < list.length; i++) {
+      var agent = list[i] || {};
+      var agentId = String(agent.id || "");
+      if (!agentId) continue;
+      var current = typeof agent.voiceId === "string" ? agent.voiceId : "";
+      var options = agentVoiceOptions(current, voiceList);
+      html += '<div class="dgh-tts-agent-row" data-agent-id="' + escHtml(agentId) + '" data-saved-voice="' + escHtml(current) + '">'
+        + '<div class="dgh-tts-agent-name" title="' + escHtml(agent.name || agentId) + '">' + escHtml(agent.name || agentId) + '</div>'
+        + '<div class="dgh-tts-agent-control">'
+        + '<select class="dgh-select dgh-tts-agent-select">' + options.html + '</select>'
+        + '<input class="dgh-input dgh-tts-agent-custom' + (options.custom ? '' : ' dgh-hidden') + '" placeholder="自定义音色 id" value="' + (options.custom ? escHtml(current) : '') + '" autocomplete="off">'
+        + '</div>'
+        + '<div class="dgh-tts-agent-action">'
+        + '<button class="dgh-btn ghost dgh-tts-agent-test" type="button">试听</button>'
+        + '<span class="dgh-tts-agent-status"></span>'
+        + '</div>'
+        + '</div>';
+    }
+    box.innerHTML = html || '<div class="dgh-tts-agent-empty">还没有找到可配置的助手。</div>';
+
+    box.querySelectorAll(".dgh-tts-agent-select").forEach(function(sel){
+      sel.addEventListener("change", function(){
+        var row = sel.closest(".dgh-tts-agent-row");
+        if (!row) return;
+        var custom = row.querySelector(".dgh-tts-agent-custom");
+        if (sel.value === "__custom__") {
+          if (custom) {
+            custom.classList.remove("dgh-hidden");
+            custom.focus();
+          }
+          return;
+        }
+        if (custom) custom.classList.add("dgh-hidden");
+        saveTtsAgentVoice(row, sel.value || "");
+      });
+    });
+    box.querySelectorAll(".dgh-tts-agent-custom").forEach(function(input){
+      input.addEventListener("change", function(){ commitTtsAgentCustom(input); });
+      input.addEventListener("blur", function(){ commitTtsAgentCustom(input); });
+    });
+    box.querySelectorAll(".dgh-tts-agent-test").forEach(function(btn){
+      btn.addEventListener("click", function(){
+        var row = btn.closest(".dgh-tts-agent-row");
+        if (row) testTtsAgentVoice(row, btn);
+      });
+    });
+    setTtsAgentListEnabled(true);
+  }
+  function commitTtsAgentCustom(input) {
+    var row = input.closest(".dgh-tts-agent-row");
+    if (!row) return;
+    var sel = row.querySelector(".dgh-tts-agent-select");
+    if (!sel || sel.value !== "__custom__") return;
+    saveTtsAgentVoice(row, input.value.trim());
+  }
+  function ttsAgentVoiceId(row) {
+    var sel = row && row.querySelector(".dgh-tts-agent-select");
+    if (!sel) return "";
+    if (sel.value === "__custom__") {
+      var input = row.querySelector(".dgh-tts-agent-custom");
+      return input ? input.value.trim() : "";
+    }
+    return sel.value || "";
+  }
+  function testTtsAgentVoice(row, btn) {
+    var status = row.querySelector(".dgh-tts-agent-status");
+    var body = ttsFormBody();
+    body.voiceId = ttsAgentVoiceId(row);
+    // 试听文案跟着助手名走（2026-08-20）：语音用当前助手的音色，文案也说这位助手的名字
+    var nameEl = row.querySelector(".dgh-tts-agent-name");
+    body.agentName = nameEl ? String(nameEl.textContent || "").trim() : "";
+    var problem = ttsValidationMessage(body);
+    if (problem) {
+      if (status) status.textContent = problem;
+      return;
+    }
+    btn.disabled = true;
+    btn.textContent = "生成中…";
+    if (status) status.textContent = "准备播放";
+    apiPost("/tts/test", body).then(function(res){
+      if (!res || !res.ok) throw new Error((res && res.error) || "试听失败");
+      if (status) status.textContent = "正在播放";
+      showToast((res && res.message) || "正在播放，听～");
+    }).catch(function(err){
+      if (status) status.textContent = "试听失败";
+      showToast("试听失败：" + err.message, "err");
+    }).finally(function(){
+      btn.disabled = false;
+      btn.textContent = "试听";
+    });
+  }
+  function restoreTtsAgentRow(row, voiceId) {
+    if (!row) return;
+    var sel = row.querySelector(".dgh-tts-agent-select");
+    var custom = row.querySelector(".dgh-tts-agent-custom");
+    if (!sel) return;
+    var known = !voiceId;
+    for (var i = 0; i < sel.options.length; i++) {
+      if (voiceId && sel.options[i].value === voiceId) { known = true; break; }
+    }
+    if (!voiceId || known) {
+      sel.value = voiceId || "";
+      if (custom) { custom.value = ""; custom.classList.add("dgh-hidden"); }
+    } else {
+      sel.value = "__custom__";
+      if (custom) { custom.value = voiceId; custom.classList.remove("dgh-hidden"); }
+    }
+    row.setAttribute("data-saved-voice", voiceId || "");
+  }
+  function saveTtsAgentVoice(row, voiceId) {
+    var agentId = row.getAttribute("data-agent-id") || "";
+    if (!agentId) return;
+    var oldValue = row.getAttribute("data-saved-voice") || "";
+    if (oldValue === voiceId) return;
+    var controls = row.querySelectorAll("select, input, button");
+    for (var i = 0; i < controls.length; i++) controls[i].disabled = true;
+    apiPost("/tts/agent-voice", { agentId: agentId, voiceId: voiceId }).then(function(res){
+      if (!res || !res.ok) throw new Error((res && res.error) || "保存失败");
+      row.setAttribute("data-saved-voice", voiceId);
+      if (!voiceId) {
+        var savedSel = row.querySelector(".dgh-tts-agent-select");
+        var savedCustom = row.querySelector(".dgh-tts-agent-custom");
+        if (savedSel) savedSel.value = "";
+        if (savedCustom) { savedCustom.value = ""; savedCustom.classList.add("dgh-hidden"); }
+      }
+      STATE.tts.voiceByAgent = STATE.tts.voiceByAgent || {};
+      if (voiceId) STATE.tts.voiceByAgent[agentId] = voiceId;
+      else delete STATE.tts.voiceByAgent[agentId];
+      for (var j = 0; j < ttsAgents.length; j++) {
+        if (ttsAgents[j].id === agentId) ttsAgents[j].voiceId = voiceId;
+      }
+      showToast(voiceId ? "专属音色已保存" : "已回到默认音色");
+    }).catch(function(err){
+      restoreTtsAgentRow(row, oldValue);
+      showToast("保存专属音色失败：" + err.message, "err");
+      return loadTtsAgents();
+    }).then(function(listReady){
+      if (listReady === false) return;
+      for (var k = 0; k < controls.length; k++) controls[k].disabled = false;
+    });
+  }
+  function fillSpeedSelect() {
+    var sel = $("dgh-tts-speed");
+    if (!sel) return;
+    var cur = (STATE.tts && STATE.tts.speed) || "1";
+    var html = "";
+    var v = 0.5;
+    for (; v <= 2.001; v += 0.1) {
+      var key = Math.round(v * 10) / 10;
+      var label = key === 1 ? "1（正常）" : String(key);
+      html += '<option value="' + key + '"' + (String(key) === String(cur) ? " selected" : "") + ">" + label + "</option>";
+    }
+    sel.innerHTML = html;
+  }
+  function loadTtsCandidates() {
+    var candSel = $("dgh-tts-candidate");
+    var autoInfo = $("dgh-tts-auto-info");
+    apiGet("/tts/candidates").then(function(res){
+      var list = (res && res.candidates) || [];
+      var curProvider = (STATE.tts && STATE.tts.providerId) || "";
+      var curModel = (STATE.tts && STATE.tts.model) || "";
+      var known = false;
+      var html = "";
+      for (var i = 0; i < list.length; i++) {
+        var c = list[i];
+        if (!c || !c.model) continue;
+        if (c.providerId === curProvider && c.model === curModel) known = true;
+        html += '<option value="' + escHtml(c.providerId + "|" + c.model) + '"' + (c.available ? "" : " disabled") + ">" + escHtml(c.providerId + " / " + c.model) + (c.available ? "" : "（未配 Key）") + "</option>";
+      }
+      if (candSel) candSel.innerHTML = html ? html : '<option value="">（没有找到语音模型）</option>';
+      if (known && candSel) candSel.value = curProvider + "|" + curModel;
+      if (autoInfo) {
+        if (list.length) {
+          var first = list[0];
+          autoInfo.textContent = "将自动使用：" + first.providerId + " / " + first.model + (first.available ? "" : "（这个还没配 Key，可能读不出来）");
+        } else {
+          autoInfo.textContent = "Hana 里没找到语音合成模型（名字带 tts/speech 的）。去 Hana 的模型设置加一个，或选自定义。";
+        }
+      }
+    }).catch(function(){
+      if (autoInfo) autoInfo.textContent = "读取模型列表失败，选自定义试试";
+    });
+  }
+  function loadTtsAgents() {
+    var status = $("dgh-tts-agent-status");
+    var refresh = $("dgh-tts-refresh-agents");
+    var requestSeq = ++ttsAgentsSeq;
+    if (status) status.textContent = "读取中…";
+    if (refresh) refresh.disabled = true;
+    setTtsAgentListEnabled(false);
+    return apiGet("/tts/agents").then(function(res){
+      if (requestSeq !== ttsAgentsSeq) return { stale: true };
+      if (!res || !res.ok) throw new Error((res && res.error) || "读取助手列表失败");
+      ttsAgents = Array.isArray(res.agents) ? res.agents : [];
+      STATE.tts.voiceByAgent = {};
+      for (var i = 0; i < ttsAgents.length; i++) {
+        var agent = ttsAgents[i];
+        if (agent && agent.id && agent.voiceId) STATE.tts.voiceByAgent[agent.id] = agent.voiceId;
+      }
+      var protocol = ttsVoiceProtocol();
+      var voiceReady = ttsVoicesProtocol === protocol
+        ? Promise.resolve({ stale: false })
+        : loadTtsVoices(protocol);
+      return voiceReady.then(function(result){
+        if (result && result.stale) return { stale: true };
+        if (requestSeq !== ttsAgentsSeq) return { stale: true };
+        renderTtsAgentVoices(ttsAgents, ttsVoices);
+        return { stale: false };
+      });
+    }).then(function(result){
+      if (requestSeq === ttsAgentsSeq && !(result && result.stale) && status) {
+        status.textContent = "已读取 " + ttsAgents.length + " 位助手";
+        return true;
+      }
+      return false;
+    }).catch(function(err){
+      if (requestSeq !== ttsAgentsSeq) return false;
+      if (status) status.textContent = "读取失败（列表可能已过期）";
+      setTtsAgentListEnabled(false);
+      showToast(err.message || "读取助手列表失败", "err");
+      return false;
+    }).finally(function(){
+      if (requestSeq === ttsAgentsSeq && refresh) refresh.disabled = false;
+    });
+  }
+  function refreshTtsLists() {
+    var refresh = $("dgh-tts-refresh-agents");
+    if (refresh) refresh.disabled = true;
+    loadTtsCandidates();
+    return loadTtsVoices(ttsVoiceProtocol()).then(function(result){
+      if (result && result.stale) return false;
+      return loadTtsAgents();
+    }).finally(function(){
+      if (refresh) refresh.disabled = false;
+    });
+  }
+  function favTime(ts) {
+    try {
+      var d = new Date(ts);
+      var p = function(n){ return n < 10 ? "0" + n : "" + n; };
+      return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) + " " + p(d.getHours()) + ":" + p(d.getMinutes());
+    } catch (e) { return ""; }
+  }
+  function renderTtsFavs(items) {
+    var box = $("dgh-tts-fav-box");
+    var list = $("dgh-tts-fav-list");
+    if (!box || !list) return;
+    if (!items || !items.length) { box.classList.add("dgh-hidden"); list.innerHTML = ""; return; }
+    box.classList.remove("dgh-hidden");
+    var html = "";
+    for (var i = 0; i < items.length && i < 50; i++) {
+      var it = items[i];
+      var txt = (it.text || "").replace(/\\s+/g, " ");
+      html += '<div class="dgh-fav-item" data-id="' + escHtml(it.id) + '">'
+        + '<div class="dgh-fav-text">' + escHtml(txt.length > 80 ? txt.slice(0, 80) + "…" : txt) + "</div>"
+        + '<div class="dgh-fav-meta">' + (it.voiceId ? escHtml(it.voiceId) + " · " : "") + (it.format || "mp3") + " · " + favTime(it.createdAt) + "</div>"
+        + '<div class="dgh-fav-actions"><button class="dgh-btn ghost dgh-fav-play" type="button">试听</button><button class="dgh-btn ghost dgh-fav-del" type="button">删除</button></div>'
+        + "</div>";
+    }
+    list.innerHTML = html;
+    list.querySelectorAll(".dgh-fav-play").forEach(function(btn){
+      btn.addEventListener("click", function(){
+        var id = btn.closest(".dgh-fav-item").getAttribute("data-id");
+        showToast("播放中…");
+        apiPost("/tts/favorites/play", { id: id }).then(function(res){
+          if (res && res.ok) showToast((res.message) || "正在播放");
+          else showToast((res && res.error) || "播放失败", "err");
+        }).catch(function(err){ showToast("播放失败：" + err.message, "err"); });
+      });
+    });
+    list.querySelectorAll(".dgh-fav-del").forEach(function(btn){
+      btn.addEventListener("click", function(){
+        var id = btn.closest(".dgh-fav-item").getAttribute("data-id");
+        apiPost("/tts/favorites/delete", { id: id }).then(function(res){
+          if (res && res.ok) { showToast("已删除"); loadTtsFavorites(); }
+          else showToast((res && res.error) || "删除失败", "err");
+        }).catch(function(err){ showToast("删除失败：" + err.message, "err"); });
+      });
+    });
+  }
+  function loadTtsFavorites() {
+    apiGet("/tts/favorites").then(function(res){
+      renderTtsFavs((res && res.items) || []);
+    }).catch(function(){});
+  }
+
+  // ── 主页「语音收藏」弹窗：按助手分组展示，试听/删除复用收藏接口 ──
+  function renderFavGroups(groups) {
+    var box = $("dgh-fav-groups");
+    if (!box) return;
+    var list = Array.isArray(groups) ? groups : [];
+    if (!list.length) {
+      box.innerHTML = '<div class="dgh-fav-group-empty">还没有收藏。<br>去悬浮球点「念给我听」朗读一段，再点「♡ 收藏」，这里就会存下带声音的小纸条。</div>';
+      return;
+    }
+    var html = "";
+    for (var g = 0; g < list.length; g++) {
+      var group = list[g] || {};
+      var items = Array.isArray(group.items) ? group.items : [];
+      var agentId = group.agentId || "";
+      var agentName = group.agentName || "其他";
+      var isOther = !agentId;
+      html += '<div class="dgh-fav-group' + (isOther ? " other" : "") + '" data-agent="' + escHtml(agentId) + '">'
+        + '<div class="dgh-fav-group-head">'
+        + '<span class="dgh-fav-avatar">' + escHtml((agentName || "?").slice(0, 1)) + "</span>"
+        + '<span class="dgh-fav-group-title">' + escHtml(agentName) + "</span>"
+        + '<span class="dgh-fav-group-count">' + items.length + " 条</span>"
+        + "</div>"
+        + (isOther ? '<div class="dgh-fav-group-note">早期收藏，没有记下是哪位助手说的</div>' : "");
+      if (!items.length) {
+        html += '<div class="dgh-fav-group-empty">这位助手还没有收藏</div>';
+      } else {
+        for (var i = 0; i < items.length; i++) {
+          var it = items[i] || {};
+          var txt = (it.text || "").replace(/\\s+/g, " ");
+          var meta = [];
+          if (it.voiceId) meta.push(escHtml(it.voiceId));
+          meta.push(it.format || "mp3");
+          meta.push(favTime(it.createdAt));
+          html += '<div class="dgh-fav-item" data-id="' + escHtml(it.id) + '">'
+            + '<div class="dgh-fav-text">' + escHtml(txt.length > 100 ? txt.slice(0, 100) + "…" : txt) + "</div>"
+            + '<div class="dgh-fav-meta">' + meta.join(" · ") + "</div>"
+            + '<div class="dgh-fav-actions">'
+            + '<button class="dgh-fav-btn play" type="button">试听</button>'
+            + '<button class="dgh-fav-btn del" type="button">删除</button>'
+            + "</div>"
+            + "</div>";
+        }
+      }
+      html += "</div>";
+    }
+    box.innerHTML = html;
+    box.querySelectorAll(".dgh-fav-btn.play").forEach(function(btn){
+      btn.addEventListener("click", function(){
+        if (btn.disabled) return;
+        btn.disabled = true;
+        btn.textContent = "播放中…";
+        var id = btn.closest(".dgh-fav-item").getAttribute("data-id");
+        apiPost("/tts/favorites/play", { id: id }).then(function(res){
+          if (res && res.ok) showToast((res.message) || "正在播放");
+          else showToast((res && res.error) || "播放失败", "err");
+        }).catch(function(err){ showToast("播放失败：" + err.message, "err"); }).finally(function(){
+          btn.disabled = false;
+          btn.textContent = "试听";
+        });
+      });
+    });
+    box.querySelectorAll(".dgh-fav-btn.del").forEach(function(btn){
+      btn.addEventListener("click", function(){
+        if (btn.classList.contains("confirm")) {
+          var id = btn.closest(".dgh-fav-item").getAttribute("data-id");
+          apiPost("/tts/favorites/delete", { id: id }).then(function(res){
+            if (res && res.ok) { showToast("已删除"); loadFavGroups(); }
+            else showToast((res && res.error) || "删除失败", "err");
+          }).catch(function(err){ showToast("删除失败：" + err.message, "err"); });
+          return;
+        }
+        btn.classList.add("confirm");
+        btn.textContent = "再点确认";
+        clearTimeout(btn._favDelTimer);
+        btn._favDelTimer = setTimeout(function(){
+          btn.classList.remove("confirm");
+          btn.textContent = "删除";
+        }, 3000);
+      });
+    });
+  }
+  function loadFavGroups() {
+    apiGet("/tts/favorites").then(function(res){
+      renderFavGroups((res && res.groups) || []);
+    }).catch(function(){
+      var box = $("dgh-fav-groups");
+      if (box) box.innerHTML = '<div class="dgh-fav-group-empty">收藏加载失败，刷新页面再试</div>';
+    });
+  }
+  function openFavModal() {
+    var m = $("dgh-fav-modal");
+    if (m) m.classList.remove("dgh-hidden");
+    loadFavGroups();
+  }
+  function closeFavModal() {
+    var m = $("dgh-fav-modal");
+    if (m) m.classList.add("dgh-hidden");
+  }
+  var favOpenBtn = $("dgh-fav-open");
+  if (favOpenBtn) favOpenBtn.addEventListener("click", openFavModal);
+  var favCloseBtn = $("dgh-fav-modal-close");
+  if (favCloseBtn) favCloseBtn.addEventListener("click", closeFavModal);
+  var favOverlay = $("dgh-fav-modal");
+  if (favOverlay) favOverlay.addEventListener("click", function(e){
+    if (e.target === favOverlay) closeFavModal();
+  });
+  function openTtsModal() {
+    var m = $("dgh-tts-modal");
+    if (m) m.classList.remove("dgh-hidden");
+    var initialProto = $("dgh-tts-protocol");
+    if (initialProto && STATE.tts && (STATE.tts.protocol === "t2a" || STATE.tts.protocol === "chat")) {
+      initialProto.value = STATE.tts.protocol;
+    }
+    syncTtsSourceBoxes(false);
+    loadTtsCandidates();
+    loadTtsAgents();
+    fillSpeedSelect();
+    var tmsg = $("dgh-tts-msg");
+    if (tmsg) tmsg.textContent = "";
+    loadTtsFavorites();
+  }
+  function closeTtsModal() {
+    var m = $("dgh-tts-modal");
+    if (m) m.classList.add("dgh-hidden");
+  }
+  var ttsOpenBtn = $("dgh-tts-open");
+  if (ttsOpenBtn) ttsOpenBtn.addEventListener("click", openTtsModal);
+  var ttsCloseBtn = $("dgh-tts-modal-close");
+  if (ttsCloseBtn) ttsCloseBtn.addEventListener("click", closeTtsModal);
+  var ttsOverlay = $("dgh-tts-modal");
+  if (ttsOverlay) ttsOverlay.addEventListener("click", function(e){
+    if (e.target === ttsOverlay) closeTtsModal();
+  });
+  document.querySelectorAll("input[name=tts_source]").forEach(function(r){
+    r.addEventListener("change", syncTtsSourceBoxes);
+  });
+  var ttsRefreshAgentsBtn = $("dgh-tts-refresh-agents");
+  if (ttsRefreshAgentsBtn) ttsRefreshAgentsBtn.addEventListener("click", function(){
+    refreshTtsLists().catch(function(err){ showToast("刷新模型和音色失败：" + err.message, "err"); });
+  });
+  var ttsProtoSel = $("dgh-tts-protocol");
+  if (ttsProtoSel) ttsProtoSel.addEventListener("change", syncTtsProtocolFields);
+
+  function ttsModelFormBody() {
+    var src = ttsRadio("source") || "auto";
+    var body = { source: src };
+    if (src === "hana") {
+      var cand = $("dgh-tts-candidate") ? $("dgh-tts-candidate").value : "";
+      var sep = cand.indexOf("|");
+      if (sep > 0) {
+        body.providerId = cand.slice(0, sep);
+        body.model = cand.slice(sep + 1);
+      }
+    } else if (src === "custom") {
+      body.protocol = ttsProtocol();
+      body.baseUrl = $("dgh-tts-url") ? $("dgh-tts-url").value.trim() : "";
+      if (body.protocol === "t2a") {
+        body.apiKey = $("dgh-tts-key") ? $("dgh-tts-key").value : "";
+        body.groupId = $("dgh-tts-group") ? $("dgh-tts-group").value.trim() : "";
+      } else {
+        body.apiKey = $("dgh-tts-key2") ? $("dgh-tts-key2").value : "";
+        body.model = $("dgh-tts-custom-model") ? $("dgh-tts-custom-model").value.trim() : "";
+      }
+    }
+    return body;
+  }
+  function ttsFormBody() {
+    var body = ttsModelFormBody();
+    body.enabled = ttsRadio("enabled") === "on";
+    body.scope = ttsRadio("scope") || "whole";
+    body.speed = $("dgh-tts-speed") ? $("dgh-tts-speed").value : "1";
+    return body;
+  }
+  function ttsValidationMessage(body) {
+    if (body.source === "hana" && !body.model) return "先选一个语音模型";
+    if (body.source === "custom" && body.protocol === "t2a" && !body.groupId) return "MiniMax 需要填 GroupId";
+    if (body.source === "custom" && !body.apiKey && !ttsHasSavedKey) return "先填 API Key";
+    return "";
+  }
+  var ttsHasSavedKey = !!(STATE.tts && STATE.tts.apiKeyMasked === "********");
+  var clearTtsKeyRequested = false;
+  function clearTtsKeyInput() {
+    var a = $("dgh-tts-key"), b = $("dgh-tts-key2");
+    if (a) a.value = "";
+    if (b) b.value = "";
+    clearTtsKeyRequested = true;
+    var ca = $("dgh-tts-key-clear"), cb = $("dgh-tts-key2-clear");
+    if (ca) ca.disabled = true;
+    if (cb) cb.disabled = true;
+    var msg = $("dgh-tts-msg");
+    if (msg) msg.textContent = "已标记清除，点击保存后生效";
+  }
+  var ttsClear1 = $("dgh-tts-key-clear"), ttsClear2 = $("dgh-tts-key2-clear");
+  if (ttsClear1) ttsClear1.addEventListener("click", clearTtsKeyInput);
+  if (ttsClear2) ttsClear2.addEventListener("click", clearTtsKeyInput);
+  // Key 就地提示（2026-08-19 分享版）：t2a/MiniMax 只认 sk-api-，粘进 sk-cp- 订阅 Key 立刻提醒，不等点试听；
+  // chat 等通用协议各家 key 前缀不同，不卡前缀，只给轻提示。
+  function hideTtsKeyTip() {
+    var w = $("dgh-tts-key-warn");
+    if (w) w.classList.add("dgh-hidden");
+  }
+  function checkTtsKeyTip(el, isT2a) {
+    var w = $("dgh-tts-key-warn");
+    if (!el || !w) return;
+    var v = (el.value || "").trim();
+    if (!v || v === "********") { hideTtsKeyTip(); return; }
+    w.classList.remove("dgh-hidden", "ok");
+    w.className = "dgh-key-tip";
+    if (isT2a) {
+      if (/^sk-cp-/i.test(v)) {
+        // 订阅 Key：走订阅套餐额度（好消息，不扣 API 余额）
+        w.className = "dgh-key-tip ok";
+        w.textContent = "这是订阅 Key（sk-cp-），语音会走你的订阅套餐额度，不扣 API 余额。" + (ttsHasSavedKey ? "想换回已保存的，清空输入框即可。" : "");
+        return;
+      }
+      if (/^sk-api-/i.test(v)) {
+        w.className = "dgh-key-tip ok";
+        w.textContent = "这是 API Key（sk-api-），语音按量计费。" + (ttsHasSavedKey ? "想换回已保存的，清空输入框即可。" : "");
+        return;
+      }
+      w.textContent = "MiniMax 语音认两种 Key：sk-api-（按量计费）或 sk-cp-（订阅套餐额度），这个开头看着不像。";
+      return;
+    }
+    // chat 通用协议：有值即用，给个状态说明
+    w.textContent = ttsHasSavedKey ? "填了新 Key，助手试听会用这个；留空则用已保存的。" : "已填 Key，助手试听会用这个。";
+  }
+  var ttsKeyInput1 = $("dgh-tts-key"), ttsKeyInput2 = $("dgh-tts-key2");
+  if (ttsKeyInput1) ttsKeyInput1.addEventListener("input", function(){ clearTtsKeyRequested = false; checkTtsKeyTip(ttsKeyInput1, true); });
+  if (ttsKeyInput2) ttsKeyInput2.addEventListener("input", function(){ clearTtsKeyRequested = false; checkTtsKeyTip(ttsKeyInput2, false); });
+  var ttsModelTestBtn = $("dgh-tts-test-model");
+  if (ttsModelTestBtn) ttsModelTestBtn.addEventListener("click", function(){
+    var tmsg = $("dgh-tts-msg");
+    var body = ttsModelFormBody();
+    body.voiceId = "";
+    body.play = false;
+    var problem = ttsValidationMessage(body);
+    if (problem) { tmsg.textContent = problem; return; }
+    ttsModelTestBtn.disabled = true;
+    ttsModelTestBtn.textContent = "连接中…";
+    tmsg.textContent = "正在检查模型连接…";
+    apiPost("/tts/test", body).then(function(res){
+      if (res && res.ok) {
+        tmsg.textContent = (res && res.message) || "模型连接正常";
+      } else {
+        tmsg.textContent = (res && res.error) || "模型连接失败";
+      }
+    }).catch(function(err){
+      tmsg.textContent = "模型连接失败：" + err.message;
+    }).finally(function(){
+      ttsModelTestBtn.disabled = false;
+      ttsModelTestBtn.textContent = "测试模型连接";
+    });
+  });
+  var ttsSaveBtn = $("dgh-tts-save");
+  if (ttsSaveBtn) ttsSaveBtn.addEventListener("click", function(){
+    var tmsg = $("dgh-tts-msg");
+    var body = ttsFormBody();
+    if (clearTtsKeyRequested) body.clearApiKey = true;
+    var problem = ttsValidationMessage(body);
+    if (problem) { tmsg.textContent = problem; return; }
+    tmsg.textContent = "保存中…";
+    apiPost("/tts/save", body).then(function(res){
+      if (res && res.ok) {
+        tmsg.textContent = "已保存";
+        var keyEl = body.protocol === "t2a" ? $("dgh-tts-key") : $("dgh-tts-key2");
+        // 保存后输入框清空，语义统一为「空 = 用已保存」，不再预填 ********（分享版：免得误以为没存又去粘 key）
+        if (keyEl) keyEl.value = "";
+        hideTtsKeyTip();
+        STATE.tts = { ...STATE.tts, ...body, apiKeyMasked: body.clearApiKey ? "" : (body.apiKey ? "********" : STATE.tts.apiKeyMasked) };
+        ttsHasSavedKey = !body.clearApiKey && (!!STATE.tts.apiKeyMasked || ttsHasSavedKey);
+        clearTtsKeyRequested = false;
+        if (ttsClear1) ttsClear1.disabled = !ttsHasSavedKey;
+        if (ttsClear2) ttsClear2.disabled = !ttsHasSavedKey;
+        setTimeout(closeTtsModal, 600);
+      } else {
+        tmsg.textContent = (res && res.error) || "保存失败";
+      }
+    }).catch(function(err){
+      tmsg.textContent = "保存失败：" + err.message;
     });
   });
 

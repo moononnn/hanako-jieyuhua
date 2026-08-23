@@ -59,6 +59,26 @@ test("ask_user_choice 工具在悬浮球未运行时不登记悬空提问", asyn
   assert.equal(listAskPending(dir).length, 0);
 });
 
+test("ask_user_choice 在融合球运行时登记提问，不把融合态误判成原版未运行", async () => {
+  const dir = tmpDir();
+  const data = loadData(dir);
+  data.config.presentation = "ball";
+  saveData(dir, data);
+  const result = await executeAsk(questionInput(), {
+    dataDir: dir,
+    sessionId: "sess_fused",
+    sessionPath: "C:/agents/hanako/sessions/fused.jsonl",
+    bus: {
+      async request(topic) {
+        assert.equal(topic, "work-visit:fusion:v1");
+        return { ok: true, mode: "fused", blocking: true, fusionPid: 12345 };
+      },
+    },
+  });
+  assert.match(result.content[0].text, /已弹出提问面板/);
+  assert.equal(listAskPending(dir).length, 1);
+});
+
 test("提问参数校验覆盖空问题、选项数量、重复项和说明长度", () => {
   assert.equal(validateAskInput(questionInput()), null);
   assert.match(validateAskInput(questionInput({ question: "" })), /问题不能为空/);
@@ -198,6 +218,39 @@ test("respondToAsk 的 Deferred 失败不会提前消费提问", async () => {
   const result = await respondToAsk(dir, bus, { askId, mode: "option", choice: "先做核心功能" });
   assert.equal(result.ok, false);
   assert.equal(getAskPending(dir, askId).consumed, false);
+});
+
+test("respondToAsk Deferred 失败后重试复用同一个 taskId，不重复注册", async () => {
+  const dir = tmpDir();
+  const { askId } = await createAskPending(dir, {
+    ...questionInput(),
+    sessionPath: "C:/agents/hanako/sessions/test.jsonl",
+  });
+  let first = true;
+  const firstCalls = [];
+  const bus = {
+    async request(name) {
+      firstCalls.push(name);
+      if (name === "deferred:resolve" && first) {
+        first = false;
+        throw new Error("temporary resolve failure");
+      }
+      return { ok: true };
+    },
+  };
+  const failed = await respondToAsk(dir, bus, { askId, mode: "option", choice: "先做核心功能" });
+  assert.equal(failed.ok, false);
+  const delivery = getAskPending(dir, askId).delivery;
+  assert.ok(delivery?.taskId);
+  assert.equal(delivery.registered, true);
+
+  const retryCalls = [];
+  const retryBus = { async request(name, payload) { retryCalls.push({ name, payload }); return { ok: true }; } };
+  const retried = await respondToAsk(dir, retryBus, { askId, mode: "option", choice: "先做核心功能" });
+  assert.equal(retried.ok, true);
+  assert.deepEqual(retryCalls.map((item) => item.name), ["deferred:resolve"]);
+  assert.equal(retryCalls[0].payload.taskId, delivery.taskId);
+  assert.equal(getAskPending(dir, askId).consumed, true);
 });
 
 test("respondToAsk 同一提问并发点击只回传一次", async () => {

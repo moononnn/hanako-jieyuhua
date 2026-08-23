@@ -16,7 +16,9 @@ import {
   saveData,
   createPending,
   getPending,
-  markPendingUsed
+  markPendingUsed,
+  createBranchRef,
+  listBranchRefs
 } from "../lib/data.js";
 import { parseSuggestions, encryptKey, decryptKey, extractResponseText, redactSecrets, validateBaseUrl } from "../lib/llm.js";
 import { buildStyleLines, execute as executeSuggest } from "../tools/suggest_replies.js";
@@ -76,6 +78,25 @@ test("normalizeData 迁移旧数据：缺字段自动补默认", () => {
   assert.equal(data.config.mode, "always");
   assert.equal(data.config.count, DEFAULT_CONFIG.count);
   assert.deepEqual(data.pending, {});
+  assert.deepEqual(data.branchRefs, []);
+});
+
+test("分支引用可落盘并在重启式读取后保留关键身份", async () => {
+  const dir = tmpDir();
+  const branch = await createBranchRef(dir, {
+    sourceSessionPath: "C:/sessions/sess_parent.jsonl",
+    sourceSessionId: "sess_parent",
+    sourceNode: { role: "assistant_turn", turnInputEntryId: "u1" },
+    branchSessionPath: "C:/sessions/sess_child.jsonl",
+    branchSessionId: "sess_child",
+    status: "active",
+  });
+  assert.ok(branch.id.startsWith("branch_"));
+  assert.equal(branch.sourceNode.turnInputEntryId, "u1");
+  const list = listBranchRefs(dir);
+  assert.equal(list.length, 1);
+  assert.equal(list[0].branchSessionPath, "C:/sessions/sess_child.jsonl");
+  assert.equal(list[0].status, "active");
 });
 
 test("数据损坏自愈：坏 JSON 回退备份，无备份回默认", () => {
@@ -83,6 +104,16 @@ test("数据损坏自愈：坏 JSON 回退备份，无备份回默认", () => {
   fs.writeFileSync(path.join(dir, "data.json"), "{broken json", "utf-8");
   const data = loadData(dir);
   assert.deepEqual(data.config, DEFAULT_CONFIG);
+});
+
+test("saveData 原子切换并保留上一份可解析备份", () => {
+  const dir = tmpDir();
+  saveData(dir, { config: { mode: "always" }, pending: {} });
+  saveData(dir, { config: { mode: "auto" }, pending: {} });
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, "data.json"), "utf8")).config.mode, "auto");
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, "data.json.bak"), "utf8")).config.mode, "always");
+  fs.unlinkSync(path.join(dir, "data.json"));
+  assert.equal(loadData(dir).config.mode, "always");
 });
 
 // ═══ pending 生命周期 ═══

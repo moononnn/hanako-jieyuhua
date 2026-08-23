@@ -30,11 +30,14 @@ import json
 import math
 import random
 import time
+import base64
 import threading
+import tempfile
 import urllib.request
 import urllib.error
+import urllib.parse
 
-from PyQt6.QtCore import Qt, QTimer, QPoint, QPointF, pyqtSignal, QPropertyAnimation, QEvent
+from PyQt6.QtCore import Qt, QTimer, QPoint, QPointF, QBuffer, QByteArray, QUrl, QIODevice, pyqtSignal, QPropertyAnimation, QEvent
 from PyQt6.QtGui import (
     QPixmap, QPainter, QColor, QFontMetrics, QCursor, QPalette,
 )
@@ -43,6 +46,16 @@ from PyQt6.QtWidgets import (
     QApplication, QWidget, QPushButton, QLabel, QFrame, QLineEdit, QScrollArea,
     QVBoxLayout, QHBoxLayout, QGridLayout, QSizePolicy,
 )
+
+# 语音朗读播放（PyQt6 自带 QtMultimedia；缺失时按钮给出提示，不硬崩）
+try:
+    from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
+    _HAS_QMULTIMEDIA = True
+except Exception:
+    _HAS_QMULTIMEDIA = False
+
+
+
 
 
 # ── 可点击的推荐条目（QLabel + 点击信号，支持自动换行） ──
@@ -54,6 +67,8 @@ class RecLabel(QLabel):
         self._idx = index
         self.setWordWrap(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAccessibleName(text)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setContentsMargins(12, 9, 12, 9)
 
@@ -61,6 +76,13 @@ class RecLabel(QLabel):
         if e.button() == Qt.MouseButton.LeftButton:
             self.clicked.emit(self._idx)
         super().mousePressEvent(e)
+
+    def keyPressEvent(self, e):
+        if e.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
+            self.clicked.emit(self._idx)
+            e.accept()
+            return
+        super().keyPressEvent(e)
 
 
 # ── 提问选项：复用推荐展板，不另开第二个窗口 ──
@@ -72,6 +94,8 @@ class AskChoiceLabel(QLabel):
         self.setObjectName("askChoice")
         self.setWordWrap(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAccessibleName(text)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.setContentsMargins(10, 8, 10, 8)
 
@@ -79,6 +103,13 @@ class AskChoiceLabel(QLabel):
         if e.button() == Qt.MouseButton.LeftButton and self.isEnabled():
             self.clicked.emit()
         e.accept()
+
+    def keyPressEvent(self, e):
+        if e.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space) and self.isEnabled():
+            self.clicked.emit()
+            e.accept()
+            return
+        super().keyPressEvent(e)
 
 
 class AskOptionFrame(QFrame):
@@ -146,6 +177,7 @@ BALL_SIZE = 80            # 透明悬浮窗尺寸；给花枝与跟随叶留出�
 FLOWER_SIZE = 34          # 恢复旧版花朵体量；枝条、叶片与80px窗口保持新版结构
 BRANCH_SIZE = 80          # 主枝横穿透明窗并在两侧被裁断，暗示树冠延伸到画面外
 LEAF_SIZE = 56            # SVG 画布留白较多，放大后叶片本体约 18px
+BALL_VISUAL_SCALE = 0.90  # 整体视觉缩小一档；保留透明窗口与交互定位不变
 SVG_SIZE = 400            # SVG 输出基准尺寸
 RENDER_SCALE = 3          # 高清渲染倍率
 RENDER_SIZE = SVG_SIZE * RENDER_SCALE
@@ -225,6 +257,20 @@ def read_hana_theme_mode():
         window_color = app.palette().color(QPalette.ColorRole.Window)
         system_dark = window_color.lightness() < 128
     return resolve_theme_mode(theme_id, system_dark)
+
+
+# ── 分支列表时间显示：今天显时分，往年显日期 ──
+def format_branch_time(ts):
+    try:
+        t = time.localtime(ts / 1000 if ts > 1e12 else ts)
+        now = time.localtime()
+        if (t.tm_year, t.tm_yday) == (now.tm_year, now.tm_yday):
+            return time.strftime("%H:%M", t)
+        if t.tm_year == now.tm_year:
+            return time.strftime("%m-%d %H:%M", t)
+        return time.strftime("%Y-%m-%d", t)
+    except Exception:
+        return ""
 
 
 def clamp_pair_drag(dx, dy, first_rect, second_rect, bounds):
@@ -447,20 +493,43 @@ def _api_headers(extra=None):
     return headers
 
 
+def _api_diag(tag, exc, path=""):
+    """API 调用失败时把异常与环境信息落盘（zhujian-api-dbg.log），排查用。"""
+    try:
+        import traceback
+        log_path = os.path.join(HANA_HOME, "data", "jiegehua", "zhujian-api-dbg.log")
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {tag} {path}\n")
+            f.write(f"  api_base={API_BASE!r} token_len={len(API_TOKEN)} proxies={urllib.request.getproxies()}\n")
+            tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).replace("\n", "\n  ")
+            f.write("  " + tb + "\n---\n")
+    except Exception:
+        pass
+
+
 def api_get(path, timeout=5):
-    req = urllib.request.Request(API_BASE + path, headers=_api_headers())
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    try:
+        req = urllib.request.Request(API_BASE + path, headers=_api_headers())
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        _api_diag("GET", e, path)
+        raise
 
 
 def api_post(path, payload, timeout=12):
-    req = urllib.request.Request(
-        API_BASE + path,
-        data=json.dumps(payload).encode("utf-8"),
-        headers=_api_headers({"Content-Type": "application/json"}),
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    try:
+        req = urllib.request.Request(
+            API_BASE + path,
+            data=json.dumps(payload).encode("utf-8"),
+            headers=_api_headers({"Content-Type": "application/json"}),
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        _api_diag("POST", e, path)
+        raise
 
 
 def load_state():
@@ -472,11 +541,21 @@ def load_state():
 
 
 def save_state(state):
+    """原子保存位置与融合面板状态，避免协调器读到半截 JSON。"""
+    temp_path = STATE_PATH + ".tmp"
     try:
         os.makedirs(os.path.dirname(STATE_PATH), exist_ok=True)
-        with open(STATE_PATH, "w", encoding="utf-8") as f:
+        with open(temp_path, "w", encoding="utf-8") as f:
             json.dump(state, f, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_path, STATE_PATH)
     except Exception as e:
+        try:
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+        except Exception:
+            pass
         print(f"[落樱] 保存状态失败: {e}", file=sys.stderr)
 
 
@@ -636,7 +715,7 @@ class SendModeMenu(FadeOnLeaveMixin, QFrame):
     def _sync_choices(self):
         send_on = self.ball.action == "send"
         self.btn_send.setText(("●  " if send_on else "○  ") + "直接发出")
-        self.btn_copy.setText(("●  " if not send_on else "○  ") + "复制到剪贴板")
+        self.btn_copy.setText(("●  " if not send_on else "○  ") + "复制")
 
     def _choose(self, action):
         self.ball._set_action(action)
@@ -706,7 +785,7 @@ class TargetMenu(QFrame):
         root.setContentsMargins(12, 11, 12, 11)
         root.setSpacing(6)
 
-        title = QLabel("推荐回复参考哪段对话？")
+        title = QLabel(getattr(self.panel, "target_menu_title", "推荐回复参考哪段对话？"))
         title.setObjectName("menuTitle")
         root.addWidget(title)
 
@@ -798,8 +877,14 @@ class TargetMenu(QFrame):
         if self.sessions_error:
             lbl = QLabel(self.sessions_error)
             lbl.setObjectName("menuSub")
+            lbl.setWordWrap(True)
             lbl.setStyleSheet(f"color: {THEME_COLORS[self.ball.theme_mode]['sub']}; font-size: 11px;")
             self.list_box.addWidget(lbl)
+            retry = QPushButton("↻ 重新读取")
+            retry.setObjectName("sessionItem")
+            retry.setCursor(Qt.CursorShape.PointingHandCursor)
+            retry.clicked.connect(lambda checked=False: self.refresh_sessions_async())
+            self.list_box.addWidget(retry)
             return
         if not self.sessions:
             lbl = QLabel("还没读取到可选对话")
@@ -813,10 +898,12 @@ class TargetMenu(QFrame):
             ts = s.get("lastUserTime") or 0
             when = time.strftime("%H:%M", time.localtime(ts / 1000)) if ts else ""
             meta = f"{name} · {when}" if when else name
+            visible_label = f"{name} · {title}" if title else name
             btn = QPushButton()
             btn.setObjectName("sessionItem")
-            btn.setText(btn.fontMetrics().elidedText(title, Qt.TextElideMode.ElideRight, 246))
-            btn.setToolTip(f"{title}\n{meta}")
+            # 助手名不能只藏在 tooltip 里：选择窗口时先认人，再认对话标题。
+            btn.setText(btn.fontMetrics().elidedText(visible_label, Qt.TextElideMode.ElideRight, 246))
+            btn.setToolTip(f"{name}\n{title}\n{when}" if when else f"{name}\n{title}")
             btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setProperty("active", "true" if (self.ball.pinned_target and self.ball.pinned_target.get("sessionPath") == s.get("sessionPath")) else "false")
@@ -847,8 +934,12 @@ class TargetMenu(QFrame):
         self.ball.target_title = ""
         self.panel._update_target()
         self.panel._flash("已改为自动判断活跃窗口 ✓")
-        self.panel._sync_target_state()
         self.panel._set_target_selector_visible(False)
+        on_target_changed = getattr(self.panel, "_on_target_changed", None)
+        if callable(on_target_changed):
+            on_target_changed()
+        else:
+            self.panel._sync_target_state()
 
     def _pick(self, s):
         self._request_seq += 1
@@ -867,12 +958,20 @@ class TargetMenu(QFrame):
             return
         self.view_mode = "pinned"
         self.ball.target_mode = "pinned"
-        self.ball.pinned_target = {"sessionPath": s.get("sessionPath") or "", "title": s.get("title") or ""}
+        self.ball.pinned_target = {
+            "sessionPath": s.get("sessionPath") or "",
+            "title": s.get("title") or "",
+            "agentId": s.get("agentId") or "",
+            "agentName": s.get("agentName") or s.get("agentId") or "",
+        }
         self.ball.target_name = s.get("agentName") or s.get("agentId") or ""
         self.ball.target_title = s.get("title") or ""
         self.panel._update_target()
         self.panel._flash("已固定这段对话 ✓")
         self.panel._set_target_selector_visible(False)
+        on_target_changed = getattr(self.panel, "_on_target_changed", None)
+        if callable(on_target_changed):
+            on_target_changed()
 
     def refresh_sessions_async(self):
         self._request_seq += 1
@@ -910,7 +1009,11 @@ class TargetMenu(QFrame):
         self.sessions = (payload.get("sessions") or [])[:TARGET_SESSION_LIMIT]
         self.ball.target_mode = payload.get("mode") or "auto"
         self.ball.pinned_target = payload.get("pinned")
-        self.view_mode = "pinned" if self.ball.target_mode == "pinned" else self.view_mode
+        if self.ball.target_mode == "pinned" and self.ball.pinned_target:
+            pinned = self.ball.pinned_target
+            self.ball.target_name = pinned.get("agentName") or pinned.get("name") or pinned.get("agentId") or self.ball.target_name
+            self.ball.target_title = pinned.get("title") or self.ball.target_title
+        self.view_mode = "pinned" if self.ball.target_mode == "pinned" else "auto"
         self.apply_theme()
         self.panel._update_target()
         self.panel._resize_after_target_change()
@@ -934,6 +1037,7 @@ class ZhujianBall(QWidget):
 
     def __init__(self):
         super().__init__(None)
+        self._closed = False
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
@@ -954,6 +1058,9 @@ class ZhujianBall(QWidget):
             print("[落樱] 花枝/花朵/叶片资源渲染失败", file=sys.stderr)
 
         self.state = load_state()
+        # 只记录当前运行中的面板，进程重启后不把旧的打开状态冒充成可继承状态。
+        self.state["fusionPanel"] = "none"
+        save_state(self.state)
         self.action = self.state.get("action") or "copy"
         self.cached = None
         self.target_name = ""
@@ -1004,7 +1111,12 @@ class ZhujianBall(QWidget):
         self._press_global = None
         self._moved = False
         self._drag_menu_was_visible = False
+        self._drag_read_was_visible = False
+        self._drag_menu_start = None
+        self._drag_read_start = None
+        self._drag_ball_start = None
         self.menu = None
+        self.read_panel = None        # 独立朗读窗口（由主面板「念给我听」打开）
         self._ask_poll_inflight = False
         self.ask_ready.connect(self._apply_ask_payload)
         # 右键浮签不再是 Popup（Popup 会抢在 toggle 前自动关闭，无法实现"再按一次右键收起"），
@@ -1015,15 +1127,32 @@ class ZhujianBall(QWidget):
         self.ask_poll_timer.timeout.connect(self._poll_ask_async)
         self.ask_poll_timer.start(ASK_POLL_INTERVAL_MS)
 
-        timer = QTimer(self)
-        timer.timeout.connect(self._tick)
-        timer.start(16)
+        self.tick_timer = QTimer(self)
+        self.tick_timer.timeout.connect(self._tick)
+        self.tick_timer.start(16)
 
         self.theme_timer = QTimer(self)
         self.theme_timer.timeout.connect(self._sync_theme)
         self.theme_timer.start(1500)
 
         self._place_from_state()
+
+    def closeEvent(self, event):
+        # 关闭悬浮球时先解除全局过滤器并停掉自身定时器；子窗口由测试夹具/进程收尾处理，
+        # 避免在 Qt close 回调里递归销毁跨窗口信号链。
+        self._closed = True
+        app = QApplication.instance()
+        if app is not None:
+            try:
+                app.removeEventFilter(self)
+            except RuntimeError:
+                pass
+        for timer in self.findChildren(QTimer):
+            try:
+                timer.stop()
+            except RuntimeError:
+                pass
+        super().closeEvent(event)
 
     # ── 提问轮询：网络在线程，界面回主线程 ──
     def _poll_ask_async(self):
@@ -1039,6 +1168,8 @@ class ZhujianBall(QWidget):
                     payload = {"ok": True, "pending": data.get("pending") or []}
             except Exception:
                 pass
+            if self._closed:
+                return
             try:
                 self.ask_ready.emit(payload)
             except RuntimeError:
@@ -1054,16 +1185,21 @@ class ZhujianBall(QWidget):
         if ask is not None:
             if self.menu is None:
                 self.menu = ZhujianMenu(self)
-            # 折叠（放弃）过的提问不再弹出——无论菜单是否可见都挡，
-            # 防止「折叠后重新打开菜单又被弹回、标志被 show_ask 重置」的死循环；
-            # 新提问（askId 不在集合）照常弹出。
-            if ask.get("askId") in self.menu._collapsed_ask_ids:
+            # 面板暂时收起不等于问题已放弃：同一个 ask 仍保留在内存里。
+            # 但用户既然主动收起了，就不要被轮询自动重新打回脸上；手动点花朵时再展开原题。
+            if (
+                self.menu.is_ask_open()
+                and self.menu._ask_user_hidden
+                and ask.get("askId") == self.menu._ask_entry.get("askId")
+            ):
                 return
             if not self.menu.isVisible():
                 # 已经在提问态时只重新显示原面板，不能先 prepare_for_show 把提问替换成推荐。
-                # 互斥：自动弹面板前也先收右键浮签，保证两窗不并存
+                # 互斥：自动弹面板前也先收右键浮签与朗读窗口，保证不并存
                 if self.context_menu is not None:
                     self.context_menu.close()
+                if self.read_panel is not None and self.read_panel.isVisible():
+                    self.read_panel.close()
                 if not self.menu.is_ask_open():
                     self.menu.prepare_for_show()
                 self.menu.move_to_ball()
@@ -1072,6 +1208,7 @@ class ZhujianBall(QWidget):
                 self.menu.activateWindow()
             self.menu.show_ask(ask)
             self.menu.raise_()
+            self._set_fusion_panel_state("ask")
             return
         if self.menu is not None and self.menu.is_ask_open():
             # ask 消失（作答完成/隐式跳过/过期）后不弹推荐，直接收起面板回悬浮球
@@ -1088,6 +1225,9 @@ class ZhujianBall(QWidget):
         if self.context_menu is not None:
             self.context_menu.apply_theme()
             self.context_menu.update()
+        if self.read_panel is not None:
+            self.read_panel.apply_theme()
+            self.read_panel.update()
 
     # ── SVG 渲染 ──
     def _render_svg_to_pixmap(self, name, size):
@@ -1135,6 +1275,13 @@ class ZhujianBall(QWidget):
         pos = self.pos()
         self.state["x"] = pos.x()
         self.state["y"] = pos.y()
+        save_state(self.state)
+
+    def _set_fusion_panel_state(self, panel):
+        panel = panel if panel in {"none", "menu", "ask", "read"} else "none"
+        if self.state.get("fusionPanel") == panel:
+            return
+        self.state["fusionPanel"] = panel
         save_state(self.state)
 
     # ── 动画帧 ──
@@ -1377,9 +1524,15 @@ class ZhujianBall(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
 
+        # 只缩放可见内容，透明窗口仍保留 80px：悬停命中、贴边和面板锚点不漂移。
+        p.save()
+        p.translate(BALL_SIZE / 2.0, BALL_SIZE / 2.0)
+        p.scale(BALL_VISUAL_SCALE, BALL_VISUAL_SCALE)
+        p.translate(-BALL_SIZE / 2.0, -BALL_SIZE / 2.0)
         lift = -0.45 * math.sin(self.t * 1.05)
         self._draw_flower(p, lift)
         self._draw_petals(p)
+        p.restore()
         p.end()
 
     def _draw_flower(self, p, lift):
@@ -1491,6 +1644,10 @@ class ZhujianBall(QWidget):
     def mousePressEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
             self._drag_menu_was_visible = bool(self.menu and self.menu.isVisible())
+            self._drag_read_was_visible = bool(self.read_panel and self.read_panel.isVisible())
+            self._drag_menu_start = self.menu.pos() if self._drag_menu_was_visible else None
+            self._drag_read_start = self.read_panel.pos() if self._drag_read_was_visible else None
+            self._drag_ball_start = self.pos()
             self._press_global = e.globalPosition().toPoint()
             self._drag = self._press_global - self.pos()
             self._moved = False
@@ -1505,8 +1662,11 @@ class ZhujianBall(QWidget):
                     e.accept()
                     return
                 self._moved = True
-            self.move(current - self._drag)
-            self._sync_dragged_menu()
+            delta = current - self._press_global
+            if self._drag_menu_was_visible or self._drag_read_was_visible:
+                self._sync_dragged_popups(delta)
+            else:
+                self.move(current - self._drag)
         e.accept()
 
     def mouseReleaseEvent(self, e):
@@ -1514,13 +1674,17 @@ class ZhujianBall(QWidget):
             self._end_press_effect()
             if self._moved:
                 self._snap()
+                self._sync_dragged_popups()
                 self._save_pos()
-                self._sync_dragged_menu()
             else:
                 self._toggle_expand()
             self._drag = None
             self._press_global = None
             self._drag_menu_was_visible = False
+            self._drag_read_was_visible = False
+            self._drag_menu_start = None
+            self._drag_read_start = None
+            self._drag_ball_start = None
         elif e.button() == Qt.MouseButton.RightButton:
             self._toggle_context_menu(e.globalPosition().toPoint())
         e.accept()
@@ -1532,13 +1696,34 @@ class ZhujianBall(QWidget):
         else:
             self._open_context_menu(global_pos)
 
-    def _sync_dragged_menu(self):
-        if not self._drag_menu_was_visible or self.menu is None:
+    def _sync_dragged_popups(self, desired_delta=None):
+        """球被单独拖动时，让已打开的面板保持用户当前的相对位置。"""
+        if self._drag_ball_start is None:
             return
-        self.menu.move_to_ball()
-        if not self.menu.isVisible():
-            self.menu.show()
-            self.menu.raise_()
+        popup = None
+        popup_start = None
+        if self._drag_read_was_visible and self.read_panel is not None:
+            popup = self.read_panel
+            popup_start = self._drag_read_start
+        elif self._drag_menu_was_visible and self.menu is not None:
+            popup = self.menu
+            popup_start = self._drag_menu_start
+        if popup is None or popup_start is None:
+            return
+        delta = desired_delta if desired_delta is not None else self.pos() - self._drag_ball_start
+        screen = self.screen() or QApplication.primaryScreen()
+        geo = screen.availableGeometry()
+        dx, dy = clamp_pair_drag(
+            delta.x(), delta.y(),
+            (self._drag_ball_start.x(), self._drag_ball_start.y(), self.width(), self.height()),
+            (popup_start.x(), popup_start.y(), popup.width(), popup.height()),
+            (geo.left(), geo.top(), geo.right() + 1, geo.bottom() + 1),
+        )
+        self.move(self._drag_ball_start + QPoint(dx, dy))
+        popup.move(popup_start + QPoint(dx, dy))
+        if not popup.isVisible():
+            popup.show()
+            popup.raise_()
 
     # ── 贴边吸附 ──
     def _snap(self):
@@ -1561,39 +1746,28 @@ class ZhujianBall(QWidget):
     def _toggle_expand(self):
         if self.menu and self.menu.isVisible():
             if self.menu.is_ask_open():
-                # 提问挂起：第一次点击只提醒不折叠，第二次确认后折叠
-                if not self.menu._ask_close_armed:
-                    self.menu._ask_close_armed = True
-                    self.menu._ask_warn_close()
-                    return
-                # 第二次点击 = 确认放弃这条提问：本地恢复推荐 + 服务端静默作废（不回传）
-                dismiss_ask_id = self.menu._ask_entry.get("askId") or ""
-                if dismiss_ask_id:
-                    self.menu._collapsed_ask_ids.append(dismiss_ask_id)
-                    if len(self.menu._collapsed_ask_ids) > 50:
-                        del self.menu._collapsed_ask_ids[:-50]
-                self.menu.restore_recommendations()
-                if dismiss_ask_id:
-                    def dismiss_worker():
-                        try:
-                            api_post("/ask/dismiss", {"askId": dismiss_ask_id}, timeout=5)
-                        except Exception:
-                            pass
-                    threading.Thread(
-                        target=dismiss_worker, daemon=True, name="zhujian-ask-dismiss",
-                    ).start()
+                # 收起只是隐藏窗口，不改变 ask 状态；再次点花朵仍会回到同一道题。
+                self._close_menu()
+                return
             self._close_menu()
+            return
+        # 主面板没开，但朗读窗口开着：点球先收掉它（停读），不展开面板
+        if self.read_panel is not None and self.read_panel.isVisible():
+            self.read_panel.close()
             return
         self._open_menu()
 
     def _close_menu(self):
         if self.menu:
             self.menu.close_menu()
+        self._set_fusion_panel_state("none")
 
     # ── 右键菜单 ──
     def _open_context_menu(self, global_pos):
-        # 互斥：开右键浮签前先收左键面板，两个弹窗永不并存（避免叠放/遮挡干扰 hover）
+        # 互斥：开右键浮签前先收左键面板与朗读窗口，弹窗永不并存（避免叠放/遮挡干扰 hover）
         self._close_menu()
+        if self.read_panel is not None and self.read_panel.isVisible():
+            self.read_panel.close()
         if self.context_menu is None:
             self.context_menu = SendModeMenu(self)
         self.context_menu.show_at(global_pos)
@@ -1631,18 +1805,24 @@ class ZhujianBall(QWidget):
 
     # ── 面板 ──
     def _open_menu(self):
+        if self.read_panel is not None and self.read_panel.isVisible():
+            self.read_panel.close()
         if self.menu is None:
             self.menu = ZhujianMenu(self)
         if not self.menu.is_ask_open():
             self.menu.prepare_for_show()
+        else:
+            # 手动重新点花朵 = 明确要回来处理这道题，解除“用户主动收起”抑制。
+            self.menu._ask_user_hidden = False
         self.menu.move_to_ball()
         self.menu.show()
         self.menu.raise_()
         self.menu.activateWindow()
+        self._set_fusion_panel_state("ask" if self.menu.is_ask_open() else "menu")
 
 
 # ─────────────────────────────
-#  推荐面板（未变动，沿用）
+#  解语花主面板：推荐回复 + 对话工具
 # ─────────────────────────────
 class ZhujianMenu(FadeOnLeaveMixin, QFrame):
     refresh_ready = pyqtSignal(object)
@@ -1668,6 +1848,7 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
         self.side = str(self.ball.state.get("panel_side") or "left")
         self._refreshing = False
         self._renaming = False
+        self._undo_available = False
         self._target_seq = 0
         self._refresh_seq = 0
         # 面板拖拽状态：面板与花朵始终作为一组移动
@@ -1678,15 +1859,11 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
         self._needs_reanchor = False  # 本次打开后内容尚未以完整高度锚定过
         self._user_dragged = False    # 本次打开后用户是否手动拖过面板（拖过则尊重手动位置）
         self._ask_entry = None
-        self._ask_restore_cache = None
         self._ask_option_frames = []
         self._ask_responding = False
         self._ask_finished = False
-        # 确认式折叠：ask 挂起时第一次点球只提醒，第二次才收起；
-        # _collapsed_ask_ids 记录用户主动折叠（放弃）的提问 id，轮询不再弹出这些题；
-        # 新提问（askId 不在集合里）照常弹出（花朵花瓣继续提醒）
-        self._ask_close_armed = False
-        self._collapsed_ask_ids = []
+        self._ask_user_hidden = False  # 用户主动收起 ask；轮询不自动打回脸上，手动重开仍保留原题
+        # ask 挂起期间允许面板暂时收起，但问题状态必须保留到真正作答完成。
         self._ask_response_mode = ""
         self._ask_response_choice = ""
         self.refresh_ready.connect(self._apply_async_refresh)
@@ -1711,11 +1888,11 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
 
         target_row = QHBoxLayout()
         target_row.setSpacing(6)
-        self.lbl_target_label = QLabel("这里可以选择按哪段对话推荐回复 →")
+        self.lbl_target_label = QLabel("当前对话")
         self.lbl_target_label.setObjectName("targetLabel")
         self.btn_target = QPushButton("自动判断 ▾")
         self.btn_target.setObjectName("target")
-        self.btn_target.setToolTip("点这里选参考对话：自动跟着最近对话，或固定一段")
+        self.btn_target.setToolTip("选择推荐、朗读和标题操作要作用于哪段对话")
         self.btn_target.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_target.clicked.connect(self._open_target_menu)
         target_row.addWidget(self.lbl_target_label)
@@ -1764,10 +1941,35 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
         self.ask_scroll.hide()
         root.addWidget(self.ask_scroll)
 
+        # 推荐区与工具区共用同一张薄荷色卡片，刷新动作自然落在卡片右侧内边。
+        self.recommend_body = QFrame()
+        self.recommend_body.setObjectName("recommendCard")
+        recommend_layout = QVBoxLayout(self.recommend_body)
+        recommend_layout.setContentsMargins(10, 8, 10, 8)
+        recommend_layout.setSpacing(8)
+        self.lbl_recommend_section = QLabel("推荐回复")
+        self.lbl_recommend_section.setObjectName("sectionTitle")
+        recommend_layout.addWidget(self.lbl_recommend_section)
+
         self.grid = QGridLayout()
         self.grid.setSpacing(8)
         self.buttons = []
-        root.addLayout(self.grid)
+        recommend_layout.addLayout(self.grid)
+
+        row_refresh = QHBoxLayout()
+        row_refresh.setContentsMargins(0, 0, 0, 0)
+        row_refresh.setSpacing(8)
+        self.btn_refresh = QPushButton("刷新推荐")
+        self.btn_refresh.setObjectName("refreshBtn")
+        self.btn_refresh.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_refresh.clicked.connect(self.refresh_async)
+        self.lbl_cache_time = QLabel("")
+        self.lbl_cache_time.setObjectName("cacheTime")
+        row_refresh.addStretch(1)
+        row_refresh.addWidget(self.lbl_cache_time)
+        row_refresh.addWidget(self.btn_refresh)
+        recommend_layout.addLayout(row_refresh)
+        root.addWidget(self.recommend_body)
 
         self.ask_input = QLineEdit()
         self.ask_input.setObjectName("askInput")
@@ -1794,48 +1996,72 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
         ask_actions.addWidget(self.btn_ask_send)
         root.addLayout(ask_actions)
 
-        self.lbl_feedback = QLabel("")
-        self.lbl_feedback.setObjectName("feedback")
-        root.addWidget(self.lbl_feedback)
-
-        row_refresh = QHBoxLayout()
-        row_refresh.setSpacing(8)
-        self.btn_refresh = QPushButton("刷新推荐")
-        self.btn_refresh.setObjectName("refreshBtn")
-        self.btn_refresh.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_refresh.clicked.connect(self.refresh_async)
-        row_refresh.addWidget(self.btn_refresh)
-        self.lbl_cache_time = QLabel("")
-        self.lbl_cache_time.setObjectName("cacheTime")
-        row_refresh.addWidget(self.lbl_cache_time)
-        row_refresh.addStretch(1)
-        root.addLayout(row_refresh)
-
-        self.lbl_section = QLabel("会话标题")
+        self.lbl_section = QLabel("对话工具")
         self.lbl_section.setObjectName("sectionTitle")
         root.addWidget(self.lbl_section)
 
-        row_rename = QHBoxLayout()
-        row_rename.setSpacing(8)
-        self.btn_rename = QPushButton("重命名标题")
+        # 工具统一成「标题 + 说明 + 动作」的卡片行，未来新增工具沿用同一骨架。
+        self.say_tool = QFrame()
+        self.say_tool.setObjectName("toolRow")
+        say_row = QHBoxLayout(self.say_tool)
+        say_row.setContentsMargins(10, 8, 10, 8)
+        say_row.setSpacing(10)
+        say_copy = QVBoxLayout()
+        say_copy.setSpacing(2)
+        self.lbl_say_title = QLabel("朗读回复")
+        self.lbl_say_title.setObjectName("toolTitle")
+        say_copy.addWidget(self.lbl_say_title)
+        self.lbl_say_desc = QLabel("让小花把当前回复念出来")
+        self.lbl_say_desc.setObjectName("toolDesc")
+        self.lbl_say_desc.setWordWrap(True)
+        say_copy.addWidget(self.lbl_say_desc)
+        say_row.addLayout(say_copy, 1)
+        self.btn_say = QPushButton("念给我听")
+        self.btn_say.setObjectName("sayBtn")
+        self.btn_say.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_say.setToolTip("打开朗读窗口，可选择要朗读的回复（需在设置页开启语音朗读）")
+        self.btn_say.clicked.connect(self._open_read_panel)
+        say_row.addWidget(self.btn_say)
+        root.addWidget(self.say_tool)
+
+        self.rename_tool = QFrame()
+        self.rename_tool.setObjectName("toolRow")
+        rename_row = QVBoxLayout(self.rename_tool)
+        rename_row.setContentsMargins(10, 8, 10, 8)
+        rename_row.setSpacing(6)
+        rename_copy = QVBoxLayout()
+        rename_copy.setSpacing(2)
+        self.lbl_rename_title = QLabel("会话标题")
+        self.lbl_rename_title.setObjectName("toolTitle")
+        rename_copy.addWidget(self.lbl_rename_title)
+        self.lbl_rename_desc = QLabel("按整段对话生成一个更贴切的名字")
+        self.lbl_rename_desc.setObjectName("toolDesc")
+        self.lbl_rename_desc.setWordWrap(True)
+        rename_copy.addWidget(self.lbl_rename_desc)
+        rename_row.addLayout(rename_copy)
+        rename_actions = QVBoxLayout()
+        rename_actions.setContentsMargins(0, 0, 0, 0)
+        rename_actions.setSpacing(6)
+        self.btn_rename = QPushButton("生成新标题")
         self.btn_rename.setObjectName("renameBtn")
         self.btn_rename.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_rename.setToolTip("总结这段对话的整体内容，给会话起个新标题")
         self.btn_rename.clicked.connect(self.rename_async)
-        row_rename.addWidget(self.btn_rename)
-        self.btn_undo = QPushButton("退回")
+        rename_actions.addWidget(self.btn_rename, 0, Qt.AlignmentFlag.AlignRight)
+        self.btn_undo = QPushButton("还原")
         self.btn_undo.setObjectName("undoBtn")
         self.btn_undo.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_undo.setToolTip("退回到上一次的标题")
+        self.btn_undo.setToolTip("还原到上一次的标题")
         self.btn_undo.setEnabled(False)
+        self.btn_undo.hide()
         self.btn_undo.clicked.connect(self.undo_async)
-        row_rename.addWidget(self.btn_undo)
-        row_rename.addStretch(1)
-        # 提示语长度受行宽限制：按钮 88+48+间距后约剩 150px，14 字会截断，用 10 字版本完整显示
-        self.lbl_rename_hint = QLabel("← 这里可以退回旧标题")
-        self.lbl_rename_hint.setObjectName("renameHint")
-        row_rename.addWidget(self.lbl_rename_hint)
-        root.addLayout(row_rename)
+        rename_actions.addWidget(self.btn_undo, 0, Qt.AlignmentFlag.AlignRight)
+        rename_row.addLayout(rename_actions)
+        root.addWidget(self.rename_tool)
+
+        self.lbl_feedback = QLabel("")
+        self.lbl_feedback.setObjectName("feedback")
+        root.addWidget(self.lbl_feedback)
 
         self.lbl_hint = QLabel("")
         self.lbl_hint.setObjectName("hint")
@@ -1862,8 +2088,12 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
             QPushButton#target:hover {{ color: {c['accent_deep']}; border-color: {c['accent']}; }}
             QPushButton#target:disabled {{ color: {c['sub']}; background: {c['surface_alt']}; border-color: {c['border']}; }}
             QLabel#hint {{ color: {c['sub']}; font-size: 11px; padding: 2px 0; }}
-            QLabel#sectionTitle {{ color: {c['accent_deep']}; font-size: 12px; font-weight: 700; }}
-            QLabel#renameHint {{ color: {c['sub']}; font-size: 10px; }}
+            QLabel#sectionTitle {{ color: {c['accent_deep']}; font-size: 12px; font-weight: 700; padding-top: 2px; }}
+            QFrame#recommendCard, QFrame#toolRow {{
+                background: {c['surface_alt']}; border: 1px dashed {c['border']}; border-radius: 12px;
+            }}
+            QLabel#toolTitle {{ color: {c['accent_deep']}; font-size: 12px; font-weight: 700; }}
+            QLabel#toolDesc {{ color: {c['sub']}; font-size: 10px; }}
             QLabel#cacheTime {{ color: {c['sub']}; font-size: 10px; }}
             QScrollArea#askScroll {{
                 border: none; background: transparent;
@@ -1890,6 +2120,7 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
             QLabel#askChoice {{
                 color: {c['ink']}; font-size: 13px; font-weight: 600;
             }}
+            QLabel#askChoice:focus {{ border: 2px solid {c['accent']}; }}
             QLabel#askDescription {{
                 color: {c['sub_deep']}; font-size: 11px; padding: 2px 10px 8px;
             }}
@@ -1915,21 +2146,23 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
             QPushButton#askSkip:disabled, QPushButton#askSend:disabled {{
                 color: {c['sub']}; background: {c['surface_alt']}; border-color: {c['border']};
             }}
-            QPushButton#refreshBtn, QPushButton#renameBtn {{
+            QPushButton#refreshBtn, QPushButton#renameBtn, QPushButton#sayBtn {{
                 min-height: 28px; min-width: 88px; color: {c['accent_text']}; background: {c['accent']};
                 border: 1px solid {c['accent']}; border-radius: 10px;
-                font-size: 11px; font-weight: 600; padding: 0 13px;
+                font-size: 11px; font-weight: 600; padding: 0 11px;
             }}
-            QPushButton#refreshBtn:hover, QPushButton#renameBtn:hover {{ background: {c['accent_deep']}; border-color: {c['accent_deep']}; }}
-            QPushButton#refreshBtn:disabled, QPushButton#renameBtn:disabled {{
+            QPushButton#refreshBtn:hover, QPushButton#renameBtn:hover, QPushButton#sayBtn:hover {{
+                background: {c['accent_deep']}; border-color: {c['accent_deep']};
+            }}
+            QPushButton#refreshBtn:disabled, QPushButton#renameBtn:disabled, QPushButton#sayBtn:disabled {{
                 color: {c['sub']}; background: {c['surface_alt']}; border-color: {c['border']};
             }}
             QPushButton#undoBtn {{
-                min-height: 28px; color: {c['accent_text']}; background: {c['accent']};
-                border: 1px solid {c['accent']}; border-radius: 10px;
-                font-size: 11px; font-weight: 600; padding: 0 13px;
+                min-height: 28px; color: {c['accent_deep']}; background: {c['surface']};
+                border: 1px solid {c['border']}; border-radius: 10px;
+                font-size: 10px; font-weight: 600; padding: 0 10px;
             }}
-            QPushButton#undoBtn:hover {{ background: {c['accent_deep']}; border-color: {c['accent_deep']}; }}
+            QPushButton#undoBtn:hover {{ background: {c['surface_alt']}; border-color: {c['accent']}; }}
             QPushButton#undoBtn:disabled {{
                 color: {c['sub']}; background: {c['surface_alt']}; border-color: {c['border']};
             }}
@@ -1939,6 +2172,7 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
                 border: 1px solid {c['border']}; border-radius: 14px; font-size: 13px;
             }}
             QLabel#rec:hover {{ background: {c['surface_alt']}; border-color: {c['accent']}; }}
+            QLabel#rec:focus {{ border: 2px solid {c['accent']}; }}
         """)
         if self.target_menu is not None:
             self.target_menu.apply_theme()
@@ -1964,15 +2198,6 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
         # 提问态保持实体：读题/作答是强互动，不参与鼠标离开淡出
         return not self.is_ask_open()
 
-    @staticmethod
-    def _copy_cache(cache):
-        if not isinstance(cache, dict) or not cache.get("items"):
-            return None
-        return {
-            **cache,
-            "items": [dict(item) for item in cache.get("items") if isinstance(item, dict)],
-        }
-
     def show_ask(self, ask):
         ask_id = ask.get("askId") if isinstance(ask, dict) else ""
         if not ask_id or self._ask_responding or self._ask_finished:
@@ -1981,24 +2206,21 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
             if ask_id == self._ask_entry.get("askId"):
                 # 当前题正在显示或等待失败重试时，不用新题覆盖输入状态；下一轮再处理。
                 return
-            # 新提问（askId 不同）：旧提问可能已被用户折叠，切换显示新提问
-            #（旧提问由服务端 TTL / 隐式跳过兑底，不丢）
+            # 新提问（askId 不同）：用最新题替换当前题，仍保持 ask 模式
+            #（旧提问由服务端 TTL / 隐式跳过兜底，不丢）
             self._ask_entry = None
-            self._ask_restore_cache = None
-        self._ask_restore_cache = self._copy_cache(self.ball.cached)
         self._ask_entry = dict(ask)
+        self._ask_user_hidden = False
         # 提问态保持实体：若此前已淡出/正在淡出，立即拉回全不透明并取消排期
         self.setWindowOpacity(1.0)
         self._cancel_fade()
         self._ask_finished = False
         self._ask_responding = False
-        self._ask_close_armed = False
-        # 注意：不清理 _collapsed_ask_ids——折叠集合是历史放弃记录，
-        # 新提问（askId 不同）天然不受影响，清理反而会让折叠过的旧题再次弹出。
         self._needs_reanchor = not self._user_dragged
         self._set_ask_mode(True)
         self._render_ask(self._ask_entry)
         self.ball._ask_emitting = True  # 提问挂起：花朵持续散发花瓣
+        self.ball._set_fusion_panel_state("ask")
         self._ask_pulse_title()
 
     def _ask_pulse_title(self, rounds=3):
@@ -2012,19 +2234,6 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
                 lambda on=on: self.lbl_head.setStyleSheet(f"color: {c['pink']};" if on else ""),
             )
 
-    def _ask_warn_close(self):
-        """确认式折叠：第一次点球时闪烁提醒，不折叠；提示文字短暂显示后自动消失。"""
-        c = THEME_COLORS[self.ball.theme_mode]
-        step_ms = 130
-        for i in range(4):
-            on = i % 2 == 0
-            QTimer.singleShot(
-                i * step_ms,
-                lambda on=on: self.lbl_head.setStyleSheet(f"color: {c['pink']};" if on else ""),
-            )
-        self._flash("还有问题没答哦，再点一次才收起")
-        QTimer.singleShot(2200, lambda: self._flash("") if self._ask_entry else None)
-
     def _set_ask_mode(self, active):
         if active:
             entry = self._ask_entry or {}
@@ -2032,8 +2241,8 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
             self.setMinimumHeight(0)  # 清掉上一轮 settle 残留的最小高度
             for widget in (
                 self.lbl_target_label, self.btn_target, self.lbl_target_info,
-                self.btn_refresh, self.lbl_cache_time, self.lbl_section,
-                self.btn_rename, self.btn_undo, self.lbl_rename_hint, self.lbl_hint,
+                self.recommend_body,
+                self.lbl_section, self.say_tool, self.rename_tool, self.lbl_hint,
             ):
                 widget.hide()
             self.target_menu.hide()
@@ -2059,8 +2268,8 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
             self.lbl_head.setText("解语花")
             for widget in (
                 self.lbl_target_label, self.btn_target, self.lbl_target_info,
-                self.btn_refresh, self.lbl_cache_time, self.lbl_section,
-                self.btn_rename, self.btn_undo, self.lbl_rename_hint, self.lbl_hint,
+                self.recommend_body,
+                self.lbl_section, self.say_tool, self.rename_tool, self.lbl_hint,
             ):
                 widget.show()
             self.ask_scroll.hide()
@@ -2218,32 +2427,6 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
             self._set_ask_controls_enabled(True)
             self._flash(payload.get("error") or "发送失败，再试一次")
 
-    def restore_recommendations(self, expected_ask_id=None):
-        if not self._ask_entry or self._ask_responding:
-            return
-        if expected_ask_id and self._ask_entry.get("askId") != expected_ask_id:
-            return
-        cache = self._ask_restore_cache or self._copy_cache(self.ball.cached)
-        self._ask_entry = None
-        self._ask_restore_cache = None
-        self._ask_finished = False
-        self._ask_response_mode = ""
-        self._ask_response_choice = ""
-        self._needs_reanchor = False
-        # 注意：不清理 _collapsed_ask_ids——折叠场景调 restore 时
-        # 折叠集合是“服务端作废失败”的本地兜底，清理会让折叠失效（关了又弹）
-        self._ask_close_armed = False
-        self.ball._ask_emitting = False  # 弹窗关闭，停止散发花瓣
-        self._set_ask_mode(False)
-        if cache and cache.get("items"):
-            self.ball.cached = cache
-            self._render_items(cache["items"])
-        else:
-            self._render_empty()
-        self._flash("")
-        self._sync_size()
-        self.keep_current_position()
-
     def finish_ask_and_collapse(self, expected_ask_id=None):
         """提问作答完成 / ask 判定可关闭（隐式跳过、过期等）后：清理提问态并收起面板回悬浮球。
 
@@ -2254,16 +2437,16 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
         if expected_ask_id and self._ask_entry.get("askId") != expected_ask_id:
             return
         self._ask_entry = None
-        self._ask_restore_cache = None
         self._ask_finished = False
+        self._ask_user_hidden = False
         self._ask_response_mode = ""
         self._ask_response_choice = ""
         self._needs_reanchor = False
-        self._ask_close_armed = False
         self.ball._ask_emitting = False  # 提问结束，停止散发花瓣
         self._set_ask_mode(False)
         self._flash("")
         self.close_menu()
+        self.ball._set_fusion_panel_state("none")
 
     def load_cache_async(self):
         def worker():
@@ -2319,6 +2502,29 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
                 pass
 
         threading.Thread(target=worker, daemon=True, name="zhujian-refresh").start()
+
+    # ── 语音朗读：主面板只留「念给我听」入口，朗读本体在独立 ReadPanel ──
+    def _open_read_panel(self):
+        """点「念给我听」：只打开选择窗口，等用户选好回复后再点击朗读。"""
+        if self.ball.read_panel is None:
+            self.ball.read_panel = ReadPanel(self.ball)
+        self.close_menu()                       # 推荐面板让位，不再自带朗读按钮
+        self.ball.read_panel.open_for(self.ball.target_name, start=False)
+        self.ball._set_fusion_panel_state("read")
+
+    def _update_say_btn(self):
+        """让朗读工具的说明跟随当前判定的助手名，按钮本身保持统一动作文案。"""
+        name = (self.ball.target_name or "").strip()
+        try:
+            self.btn_say.setText("念给我听")
+            self.lbl_say_desc.setText(f"让 {name or '小花'} 把当前回复念出来")
+        except RuntimeError:
+            pass
+
+    def hideEvent(self, event):
+        # 朗读归独立 ReadPanel 管理（它自己有关闭即停读），主面板收起不管声音
+        super().hideEvent(event)
+        self._cancel_fade()
 
     def _apply_async_refresh(self, payload):
         if payload.get("source") == "refresh" and payload.get("seq") != self._refresh_seq:
@@ -2430,7 +2636,7 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
             # 第一行显示新标题，第二行提示宿主侧栏的刷新规律（回合结束才重拉列表）
             tip = "（兜底标题）" if payload.get("fallback") else ""
             self._flash(f"已改为：{payload['title']}\n{tip}聊一句后自动刷新")
-            self.btn_undo.setEnabled(True)
+            self._set_undo_available(True)
             self._sync_target_state()
         else:
             self._flash(payload.get("error") or "重命名失败，再试一次")
@@ -2440,16 +2646,24 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
             restored = payload.get("restoredTitle") or "无标题"
             who = f"{payload['agentName']} 的" if payload.get("agentName") else ""
             self._flash(f"已把{who}会话标题退回：{restored}")
-            self.btn_undo.setEnabled(False)
+            self._set_undo_available(False)
             self._sync_target_state()
         else:
             self._flash(payload.get("error") or "退回失败，再试一次")
 
+    def _set_undo_available(self, available):
+        available = bool(available)
+        changed = self._undo_available != available
+        self._undo_available = available
+        self.btn_undo.setVisible(available)
+        self.btn_undo.setEnabled(available and not self._renaming)
+        if changed and self.isVisible():
+            self._resize_after_title_change()
+
     def _set_renaming_ui(self, renaming):
         self.btn_rename.setEnabled(not renaming)
-        self.btn_rename.setText("总结中…" if renaming else "重命名标题")
-        if renaming:
-            self.btn_undo.setEnabled(False)
+        self.btn_rename.setText("总结中…" if renaming else "生成新标题")
+        self.btn_undo.setEnabled(self._undo_available and not renaming)
 
     def _update_cache_time(self):
         ts = (self.ball.cached or {}).get("ts") or 0
@@ -2503,7 +2717,7 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
             return
         rid = (self.ball.cached or {}).get("rid") or ""
         action = self.ball.action
-        self._flash("正在发送…" if action == "send" else "正在复制…")
+        self._flash("正在发送…" if action == "send" else "正在填入…")
         try:
             if action == "send":
                 res = api_post("/apply", {"rid": rid, "index": index}, timeout=20)
@@ -2515,7 +2729,7 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
                 res = api_post("/copy", {"rid": rid, "index": index}, timeout=8)
                 if res.get("ok") and res.get("text"):
                     self._copy_to_clipboard(res["text"])
-                    self._flash("已复制 ✓")
+                    self._flash("已复制 ✓ 手动粘贴到对话框")
                 else:
                     self._flash(res.get("error") or "复制失败")
         except urllib.error.HTTPError as e:
@@ -2561,6 +2775,7 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
         else:
             text = "自动 · 正在定位对话…"
         self.lbl_target_info.setText(text)
+        self._update_say_btn()
 
     def _sync_target_state(self):
         self._target_seq += 1
@@ -2591,9 +2806,9 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
         self.ball.target_mode = "pinned" if data.get("mode") == "pinned" else "auto"
         self.ball.pinned_target = data.get("pinned")
         self._update_target()
-        # 退回按钮可用性由服务端真实记录驱动（面板打开/重命名/退回都会刷新）
+        # 退回按钮的显示与可用性都由服务端真实记录驱动。
         if "undoAvailable" in data and not self._renaming:
-            self.btn_undo.setEnabled(bool(data.get("undoAvailable")))
+            self._set_undo_available(data.get("undoAvailable"))
 
     def invalidate_target_sync(self):
         """用户主动切换目标时作废先前的 /target 回包，避免旧状态覆盖新选择。"""
@@ -2619,9 +2834,17 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
                 self.move_to_ball()
         QTimer.singleShot(0, lambda: QTimer.singleShot(0, settle))
 
+    def _resize_after_title_change(self):
+        # 还原按钮显示/隐藏会改变面板高度；非手动拖动时重新按比例贴回悬浮球。
+        def settle():
+            self._sync_size()
+            if self.isVisible() and not self._user_dragged:
+                self.move_to_ball()
+        QTimer.singleShot(0, lambda: QTimer.singleShot(0, settle))
+
     def _update_hint(self):
         action = self.ball.action
-        mode = "点一下直接发出" if action == "send" else "点一下复制，粘到输入框发出"
+        mode = "点一下直接发出" if action == "send" else "点一下复制，自己粘贴到对话框"
         self.lbl_hint.setText(f"当前模式：{mode}")
         self._flash("")
 
@@ -2717,6 +2940,8 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
         self.move(x, y)
 
     def close_menu(self):
+        if self.is_ask_open():
+            self._ask_user_hidden = True
         if self.target_menu is not None:
             self.target_menu.hide()
         self.hide()
@@ -2803,8 +3028,1485 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
 
 
 # ─────────────────────────────
-#  入口
+#  朗读专属弹窗（点主面板「念给我听」打开）
 # ─────────────────────────────
+class ReadPanel(QFrame):
+    """独立朗读窗口：把播放/暂停/继续、重听、刷新回复、收藏集中在一处，
+    从推荐面板拆出，空间宽裕不拥挤。关闭即停读；播完自动复位。"""
+
+    read_ready = pyqtSignal(object)   # /tts/speak 回包
+    fav_ready = pyqtSignal(object)    # /tts/favorite 回包
+    target_ready = pyqtSignal(object) # /target 回包
+    replies_ready = pyqtSignal(object) # /tts/replies 回包
+
+    WIDTH = 320
+
+    def __init__(self, ball):
+        super().__init__(None)
+        self.ball = ball
+        self.target_menu_title = "朗读哪段对话？"
+        self._name = ""
+        # 面板边向：与推荐面板共用同一份 panel_side（贴边翻边后写入），默认左
+        self.side = str((getattr(self.ball, "state", None) or {}).get("panel_side") or "left")
+        # 双窗拖动状态：朗读窗与花朵始终作为一组移动（与推荐面板一致）
+        self._drag_press = None
+        self._drag_panel_start = None
+        self._drag_ball_start = None
+        self._drag_moved = False
+        self._user_dragged = False
+        self._reading = False
+        self._player = None
+        self._audio_out = None
+        self._media_path = None    # 临时音频文件路径（播放走文件，Qt 内存播 mp3 不稳）
+        self._last_read = None     # 最近一次朗读的内容（文本/音频/音色），供收藏
+        self._replies = []         # 最新在前，最多 6 条助手回复
+        self._reply_index = 0      # 0=最新，1~5=往前第几条
+        self._replies_loading = False
+        self._replies_error = ""
+        self._read_session_path = ""
+        self._auto_read_pending = False
+        self._read_seq = 0
+        self._fav_seq = 0
+        self._target_seq = 0
+        self._replies_seq = 0
+        self._refresh_feedback_seq = 0
+        self._closed = False
+
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+            | Qt.WindowType.NoDropShadowWindowHint
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setObjectName("readPanel")
+        self.setFixedWidth(self.WIDTH)
+
+        self.read_ready.connect(self._apply_read_result)
+        self.fav_ready.connect(self._apply_fav_result)
+        self.target_ready.connect(self._apply_target_state)
+        self.replies_ready.connect(self._apply_replies)
+        self._build_ui()
+        self.apply_theme()
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(20, 14, 20, 16)
+        root.setSpacing(10)
+
+        # 头部：当前助手名 + 关闭
+        head = QHBoxLayout()
+        head.setSpacing(8)
+        self.lbl_head = QLabel("让 助手 说话")
+        self.lbl_head.setObjectName("readHead")
+        head.addWidget(self.lbl_head)
+        head.addStretch(1)
+        self.btn_close = QPushButton("✕")
+        self.btn_close.setObjectName("readCloseBtn")
+        self.btn_close.setFixedSize(24, 24)
+        self.btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_close.setToolTip("收起朗读（停止播放）")
+        self.btn_close.clicked.connect(self.close)
+        head.addWidget(self.btn_close)
+        root.addLayout(head)
+
+        # 朗读目标窗口：与推荐面板共用自动判断/手动固定逻辑
+        target_row = QHBoxLayout()
+        target_row.setSpacing(6)
+        self.lbl_target_label = QLabel("选择对话")
+        self.lbl_target_label.setObjectName("readTargetLabel")
+        self.btn_target = QPushButton("自动判断 ▾")
+        self.btn_target.setObjectName("readTargetBtn")
+        self.btn_target.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_target.setToolTip("自动跟着最近对话，或固定一段窗口")
+        self.btn_target.clicked.connect(self._open_target_menu)
+        target_row.addWidget(self.lbl_target_label)
+        target_row.addWidget(self.btn_target)
+        target_row.addStretch(1)
+        root.addLayout(target_row)
+
+        self.lbl_target_info = QLabel("")
+        self.lbl_target_info.setObjectName("readTargetInfo")
+        self.lbl_target_info.setWordWrap(True)
+        root.addWidget(self.lbl_target_info)
+
+        self.target_menu = TargetMenu(self)
+        self.target_menu.hide()
+        root.addWidget(self.target_menu)
+
+        # 朗读哪一条：默认最新，列表里再给最新前的 5 条
+        reply_row = QHBoxLayout()
+        reply_row.setSpacing(6)
+        self.lbl_reply_label = QLabel("选择回复")
+        self.lbl_reply_label.setObjectName("readReplyLabel")
+        self.btn_reply = QPushButton("最新回复 ▾")
+        self.btn_reply.setObjectName("readReplyBtn")
+        self.btn_reply.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_reply.setToolTip("默认朗读最新回复，也可以从前 5 条里挑一条")
+        self.btn_reply.clicked.connect(self._open_reply_menu)
+        self.btn_refresh_replies = QPushButton("↻ 刷新")
+        self.btn_refresh_replies.setObjectName("readRefreshBtn")
+        self.btn_refresh_replies.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_refresh_replies.setToolTip("重新读取这段对话的最新 6 条助手回复，不会自动朗读")
+        self.btn_refresh_replies.clicked.connect(
+            lambda checked=False: self.refresh_replies_async(reset_read=True)
+        )
+        reply_row.addWidget(self.lbl_reply_label)
+        reply_row.addWidget(self.btn_reply)
+        reply_row.addWidget(self.btn_refresh_replies)
+        reply_row.addStretch(1)
+        root.addLayout(reply_row)
+
+        self.reply_menu = QFrame(self)
+        self.reply_menu.setObjectName("readReplyMenu")
+        reply_menu_layout = QVBoxLayout(self.reply_menu)
+        reply_menu_layout.setContentsMargins(8, 8, 8, 8)
+        reply_menu_layout.setSpacing(5)
+        self.reply_list_box = QVBoxLayout()
+        self.reply_list_box.setContentsMargins(0, 0, 0, 0)
+        self.reply_list_box.setSpacing(5)
+        reply_menu_layout.addLayout(self.reply_list_box)
+        self.reply_menu.hide()
+        root.addWidget(self.reply_menu)
+
+        # 朗读文本预览：完整显示不截断，超长限高；可选中复制
+        self.lbl_text = QLabel("")
+        self.lbl_text.setObjectName("readText")
+        self.lbl_text.setWordWrap(True)
+        self.lbl_text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.lbl_text.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        self.lbl_text.setMaximumHeight(132)
+        root.addWidget(self.lbl_text)
+
+        # 主播放键：读 / 暂停 / 继续 三态
+        self.btn_play = QPushButton("🔊 朗读")
+        self.btn_play.setObjectName("readPlayBtn")
+        self.btn_play.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_play.clicked.connect(self.toggle_play)
+        root.addWidget(self.btn_play)
+
+        # 次键：重听 / 收藏（都只作用于当前选中的回复）
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        self.btn_replay = QPushButton("↻ 重听")
+        self.btn_replay.setObjectName("readSubBtn")
+        self.btn_replay.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_replay.setToolTip("从头重新播放当前选中的回复")
+        self.btn_replay.clicked.connect(self.replay_read)
+        self.btn_replay.setEnabled(False)
+        self.btn_sub_fav = QPushButton("♡ 收藏")
+        self.btn_sub_fav.setObjectName("readSubBtn")
+        self.btn_sub_fav.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_sub_fav.setToolTip("把当前选中的回复存进收藏，以后不用重新合成、随时能听")
+        self.btn_sub_fav.clicked.connect(self.fav_read_async)
+        self.btn_sub_fav.setEnabled(False)
+        for b in (self.btn_replay, self.btn_sub_fav):
+            row.addWidget(b)
+        row.addStretch(1)
+        root.addLayout(row)
+
+        self.lbl_feedback = QLabel("")
+        self.lbl_feedback.setObjectName("readFeedback")
+        root.addWidget(self.lbl_feedback)
+
+    # ── 目标窗口与回复选择 ──
+    def _clear_reply_menu(self):
+        while self.reply_list_box.count():
+            item = self.reply_list_box.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.hide()
+                widget.deleteLater()
+
+    def _reply_choice_text(self, index, preview=""):
+        prefix = "最新回复" if index == 0 else f"前 {index} 条回复"
+        clean = " ".join(str(preview or "").split())
+        return f"{prefix} · {clean or '（没有可预览的文字）'}"
+
+    def _update_reply_button(self):
+        label = "最新回复" if self._reply_index == 0 else f"前 {self._reply_index} 条回复"
+        self.btn_reply.setText(label + " ▾")
+
+    def _render_replies(self):
+        self._clear_reply_menu()
+        if self._replies_loading:
+            lbl = QLabel("正在读取这段对话的回复…")
+            lbl.setObjectName("readReplySub")
+            self.reply_list_box.addWidget(lbl)
+            return
+        if self._replies_error:
+            lbl = QLabel(self._replies_error)
+            lbl.setObjectName("readReplySub")
+            lbl.setWordWrap(True)
+            self.reply_list_box.addWidget(lbl)
+            retry = QPushButton("↻ 重新读取")
+            retry.setObjectName("replyItem")
+            retry.setCursor(Qt.CursorShape.PointingHandCursor)
+            retry.clicked.connect(lambda checked=False: self.refresh_replies_async(reset_read=True))
+            self.reply_list_box.addWidget(retry)
+            return
+        if not self._replies:
+            lbl = QLabel("还没找到可朗读的助手回复")
+            lbl.setObjectName("readReplySub")
+            self.reply_list_box.addWidget(lbl)
+            return
+        for index, item in enumerate(self._replies):
+            preview = str(item.get("preview") or "")
+            btn = QPushButton()
+            btn.setObjectName("replyItem")
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setProperty("active", "true" if index == self._reply_index else "false")
+            label = self._reply_choice_text(index, preview)
+            btn.setText(btn.fontMetrics().elidedText(label, Qt.TextElideMode.ElideRight, 250))
+            btn.setToolTip(preview or label)
+            btn.clicked.connect(lambda checked=False, i=index: self._pick_reply(i))
+            self.reply_list_box.addWidget(btn)
+        self.reply_list_box.addStretch(1)
+
+    def _open_reply_menu(self):
+        show = not self.reply_menu.isVisible()
+        if show:
+            self._set_target_selector_visible(False)
+        self._set_reply_selector_visible(show)
+        if show and not self._replies and not self._replies_loading:
+            self.refresh_replies_async()
+
+    def _set_reply_selector_visible(self, visible):
+        self.reply_menu.setVisible(bool(visible))
+        if visible:
+            self.target_menu.hide()
+        self._resize_after_target_change()
+
+    def _pick_reply(self, index):
+        if index < 0 or index >= len(self._replies):
+            return
+        self._reply_index = index
+        self._update_reply_button()
+        self._render_replies()
+        self._set_reply_selector_visible(False)
+        self._clear_current_read()
+        label = "最新回复" if index == 0 else f"前 {index} 条回复"
+        self._flash(f"已选{label}，点「朗读」播放")
+
+    def _clear_current_read(self):
+        self._read_seq += 1
+        self._fav_seq += 1
+        self._stop_read()
+        self._reset_read_ui()
+        self._last_read = None
+        self.btn_sub_fav.setEnabled(False)
+        self.btn_sub_fav.setText("♡ 收藏")
+        self.lbl_text.setText("")
+
+    def _open_target_menu(self):
+        show = not self.target_menu.isVisible()
+        if show:
+            self._set_reply_selector_visible(False)
+        self._set_target_selector_visible(show)
+        if show:
+            self.target_menu.view_mode = "pinned" if self.ball.target_mode == "pinned" else "auto"
+            self.target_menu.refresh_sessions_async()
+
+    def _update_target(self):
+        arrow = "▴" if self.target_menu.isVisible() else "▾"
+        if self.ball.target_mode == "pinned" and self.ball.pinned_target:
+            title = (self.ball.target_title or self.ball.pinned_target.get("title") or "").strip()
+            label = f"固定 · {title[:6]}" if title else "固定"
+        else:
+            label = "自动判断"
+        self.btn_target.setText(label + " " + arrow)
+        self._update_target_info()
+
+    def _update_target_info(self):
+        name = (self.ball.target_name or "").strip()
+        if self.ball.target_mode == "pinned" and self.ball.pinned_target:
+            title = (self.ball.target_title or self.ball.pinned_target.get("title") or "").strip()
+            prefix = "固定"
+        else:
+            title = (self.ball.target_title or "").strip()
+            prefix = "自动"
+        if title:
+            text = " · ".join([prefix, name, title]) if name else " · ".join([prefix, title])
+        elif name:
+            text = " · ".join([prefix, name]) + "（无标题）"
+        else:
+            text = "自动 · 正在定位对话…"
+        self.lbl_target_info.setText(text)
+        self._name = name
+        self.lbl_head.setText("让 " + (name or "助手") + " 说话")
+
+    def _on_target_changed(self):
+        """TargetMenu 已完成 pin：清掉旧目标，立刻按新目标重拉回复列表。"""
+        self._auto_read_pending = False
+        self._read_session_path = ""
+        self._reply_index = 0
+        self._clear_current_read()
+        self._update_reply_button()
+        self.refresh_replies_async()
+
+    def _sync_target_state(self):
+        self._target_seq += 1
+        target_seq = self._target_seq
+
+        def worker():
+            payload = None
+            try:
+                data = api_get("/target", timeout=4)
+                if data.get("ok"):
+                    payload = {**data, "seq": target_seq}
+            except Exception:
+                pass
+            if payload is not None and not self._closed:
+                try:
+                    self.target_ready.emit(payload)
+                except RuntimeError:
+                    pass
+
+        threading.Thread(target=worker, daemon=True, name="jiegehua-read-target").start()
+
+    def _apply_target_state(self, data):
+        if data.get("seq") != self._target_seq:
+            return
+        target = data.get("target")
+        if target:
+            self.ball.target_name = target.get("name") or target.get("agentId") or ""
+            self.ball.target_title = target.get("title") or ""
+        else:
+            self.ball.target_name = ""
+            self.ball.target_title = ""
+        self.ball.target_mode = "pinned" if data.get("mode") == "pinned" else "auto"
+        self.ball.pinned_target = data.get("pinned")
+        self._update_target()
+        if self.isVisible():
+            self.refresh_replies_async()
+
+    def invalidate_target_sync(self):
+        """用户主动切换窗口时，让旧目标的声音和回复列表立即失效。"""
+        self._target_seq += 1
+        self._auto_read_pending = False
+        # 先停掉旧语音，但保留旧列表；/pin 失败时仍能回到原选择。
+        self._clear_current_read()
+
+    def _set_target_selector_visible(self, visible):
+        self.target_menu.setVisible(bool(visible))
+        self._update_target()
+        self._resize_after_target_change()
+
+    def _resize_after_target_change(self):
+        # 与推荐面板一致：菜单/内容变化后重新定位，用户拖过则保持手动位置
+        if self.isVisible():
+            self._keep_position()
+
+    def refresh_replies_async(self, auto_read=False, reset_read=False):
+        if reset_read:
+            self._reply_index = 0
+            self._clear_current_read()
+            self._update_reply_button()
+            self._flash("正在刷新回复列表…")
+        self._auto_read_pending = bool(auto_read)
+        self._replies_seq += 1
+        replies_seq = self._replies_seq
+        self._refresh_feedback_seq = replies_seq if reset_read else 0
+        self._replies_loading = True
+        self._replies_error = ""
+        self.btn_refresh_replies.setEnabled(False)
+        self._render_replies()
+        expected_session_path = str(self._read_session_path or "") if reset_read else ""
+
+        def worker():
+            payload = {"seq": replies_seq, "ok": False, "replies": [], "sessionPath": expected_session_path, "error": "读取失败，点「↻ 刷新」再试"}
+            try:
+                route = "/tts/replies"
+                if expected_session_path:
+                    route += "?sessionPath=" + urllib.parse.quote(expected_session_path, safe="")
+                data = api_get(route, timeout=5)
+                if data.get("ok"):
+                    returned_session_path = str(data.get("sessionPath") or "")
+                    same_path = bool(
+                        expected_session_path
+                        and returned_session_path
+                        and os.path.normcase(os.path.normpath(expected_session_path))
+                        == os.path.normcase(os.path.normpath(returned_session_path))
+                    )
+                    if expected_session_path and not same_path:
+                        payload["sessionPath"] = expected_session_path
+                        payload["error"] = "当前对话刚刚变化了，点「↻ 刷新」再试"
+                    else:
+                        payload = {
+                            "seq": replies_seq,
+                            "ok": True,
+                            "replies": data.get("replies") or [],
+                            "sessionPath": returned_session_path,
+                            "target": data.get("target"),
+                            "mode": data.get("mode") or "auto",
+                            "pinned": data.get("pinned"),
+                            "error": "",
+                        }
+                else:
+                    payload["error"] = data.get("error") or payload["error"]
+            except urllib.error.HTTPError as e:
+                try:
+                    body = json.loads(e.read().decode("utf-8"))
+                    payload["error"] = body.get("error") or f"读取失败了 ({e.code})"
+                except Exception:
+                    payload["error"] = f"读取失败了 ({e.code})"
+            except Exception:
+                pass
+            if self._closed:
+                return
+            try:
+                self.replies_ready.emit(payload)
+            except RuntimeError:
+                pass
+
+        threading.Thread(target=worker, daemon=True, name="jiegehua-read-replies").start()
+
+    def _apply_replies(self, payload):
+        if payload.get("seq") != self._replies_seq:
+            return
+        self._replies_loading = False
+        self.btn_refresh_replies.setEnabled(True)
+        show_refresh_feedback = payload.get("seq") == self._refresh_feedback_seq
+        if show_refresh_feedback:
+            self._refresh_feedback_seq = 0
+        self._replies_error = payload.get("error") or ""
+        self._read_session_path = str(payload.get("sessionPath") or "")
+        auto_read = self._auto_read_pending
+        self._auto_read_pending = False
+        target = payload.get("target")
+        if target:
+            self.ball.target_name = target.get("name") or target.get("agentId") or ""
+            self.ball.target_title = target.get("title") or ""
+        elif payload.get("ok"):
+            self.ball.target_name = ""
+            self.ball.target_title = ""
+        if payload.get("ok"):
+            self.ball.target_mode = "pinned" if payload.get("mode") == "pinned" else "auto"
+            self.ball.pinned_target = payload.get("pinned")
+            self._replies = [item for item in (payload.get("replies") or []) if isinstance(item, dict)][:6]
+            self._reply_index = 0
+        else:
+            self._replies = []
+        self._update_target()
+        self._update_reply_button()
+        self._render_replies()
+        self._resize_after_target_change()
+        if show_refresh_feedback:
+            self._flash(
+                "回复列表已更新，点「朗读」播放"
+                if payload.get("ok")
+                else (self._replies_error or "回复列表读取失败，点「↻ 刷新」再试")
+            )
+        if auto_read and payload.get("ok") and self._read_session_path and self._replies and self.isVisible():
+            QTimer.singleShot(0, self.read_async)
+
+    # ── 打开 / 定位 ──
+    def open_for(self, name, start=False):
+        self._closed = False
+        self._read_seq += 1
+        self._fav_seq += 1
+        self._target_seq += 1
+        self._replies_seq += 1
+        requested_name = (name or "").strip()
+        self._name = requested_name
+        self._reply_index = 0
+        self._last_read = None
+        self._replies = []
+        self._replies_error = ""
+        self._replies_loading = False
+        self._read_session_path = ""
+        self._auto_read_pending = bool(start)
+        self.target_menu.hide()
+        self.reply_menu.hide()
+        self.lbl_head.setText("让 " + (self._name or "助手") + " 说话")
+        self.lbl_text.setText("")
+        self._stop_read()
+        self._reset_read_ui()
+        self.btn_sub_fav.setEnabled(False)
+        self.btn_sub_fav.setText("♡ 收藏")
+        self.btn_refresh_replies.setEnabled(True)
+        self._update_reply_button()
+        self._update_target()
+        if requested_name and not self.ball.target_name:
+            self._name = requested_name
+            self.lbl_head.setText("让 " + requested_name + " 说话")
+        self._render_replies()
+        self.apply_theme()
+        self.move_to_ball()
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        # 布局稳定后再校准一次位置（空文本时高度偏小，读到内容后还会再 settle）
+        self._settle()
+        # 打开弹窗只读取可选回复，不自动消耗语音额度；start=True 仅保留给
+        # 旧调用方的显式兼容路径，正常入口传 False，必须由用户点击「朗读」才合成。
+        self.refresh_replies_async(auto_read=bool(start))
+
+    def move_to_ball(self):
+        """与推荐面板同一套定位：贴边翻边 + 38% 锚点（花在窗口上部，主体在下方）。"""
+        self._sync_size()
+        b = self.ball
+        screen = b.screen() or QApplication.primaryScreen()
+        geo = screen.availableGeometry()
+        bw = b.width()
+        bh = b.height()
+        # 球在中间时保持记住的边向，移开后不弹回
+        snap_margin = 26
+        if b.x() + bw > geo.right() - snap_margin:
+            side = "left"      # 球贴右缘 → 面板翻到左边
+        elif b.x() < geo.left() + snap_margin:
+            side = "right"     # 球贴左缘 → 面板翻到右边
+        else:
+            side = self.side   # 中间：保持当前边向
+        if side != self.side:
+            self.side = side
+            if getattr(b, "state", None) is not None:
+                b.state["panel_side"] = side
+                save_state(b.state)
+        # 按边向放面板；当前侧放不下（窄屏/球太靠边）自动翻另一侧兜底
+        if side == "left":
+            x = b.x() - self.width() - 8
+            if x < geo.left():
+                side = "right"
+                x = b.x() + bw + 8
+        else:
+            x = b.x() + bw + 8
+            if x + self.width() > geo.right():
+                side = "left"
+                x = b.x() - self.width() - 8
+        if side != self.side:
+            self.side = side
+            if getattr(b, "state", None) is not None:
+                b.state["panel_side"] = side
+                save_state(b.state)
+        x = max(geo.left(), min(x, geo.right() - self.width() + 1))
+        y = popup_anchor_y(
+            (b.x(), b.y(), bw, bh), self.height(),
+            (geo.left(), geo.top(), geo.right() + 1, geo.bottom() + 1),
+            PANEL_ANCHOR_RATIO,
+        )
+        self.move(x, y)
+
+    def _keep_position(self):
+        """内容高度变化后：用户拖过就保持当前，没拖过按球重新锚定（两轮事件循环后）。"""
+        if not self.isVisible():
+            return
+        def settle_now():
+            self._sync_size()
+            if self._user_dragged:
+                screen = self.ball.screen() or QApplication.primaryScreen()
+                geo = screen.availableGeometry()
+                x = max(geo.left(), min(self.x(), geo.right() - self.width() + 1))
+                y = max(geo.top(), min(self.y(), geo.bottom() - self.height() + 1))
+                self.move(x, y)
+            else:
+                self.move_to_ball()
+        QTimer.singleShot(0, lambda: QTimer.singleShot(0, settle_now))
+
+    def _sync_size(self):
+        if self.layout() is not None:
+            self.layout().activate()
+        self.adjustSize()
+
+    def _settle(self):
+        # 内容高度变化后等两轮事件循环再调尺寸与位置，避免跳动
+        if not self.isVisible():
+            return
+        self._keep_position()
+
+    # ── 播放控制 ──
+    def toggle_play(self):
+        if not _HAS_QMULTIMEDIA:
+            self._flash("缺少音频播放组件（PyQt6 需要 QtMultimedia），重新安装 PyQt6 就好")
+            return
+        if self._player is not None:
+            st = self._player.playbackState()
+            if st == QMediaPlayer.PlaybackState.PlayingState:
+                self._player.pause()
+                self.btn_play.setText("▶ 继续")
+                self._flash("已暂停 · 点 ▶ 继续")
+                return
+            if st == QMediaPlayer.PlaybackState.PausedState:
+                self._player.play()
+                self.btn_play.setText("⏸ 暂停")
+                self._flash("继续播放中…")
+                return
+        if self._reading:
+            self._flash("正在生成语音，等一下")
+            return
+        if self._last_read and self._last_read.get("audio"):
+            # 播完/复位过：直接重播刚读的这段（不重新合成）
+            self._play_audio(self._last_read["audio"], self._last_read.get("format") or "mp3")
+            return
+        self.read_async()
+
+    def read_async(self):
+        if not _HAS_QMULTIMEDIA:
+            self._flash("缺少音频播放组件（PyQt6 需要 QtMultimedia），重新安装 PyQt6 就好")
+            return
+        if self._reading:
+            self._flash("正在生成语音，等一下")
+            return
+        if self.isVisible() and self._replies_loading:
+            self._flash("正在读取对话和回复，等一下")
+            return
+        if self.isVisible() and not self._read_session_path:
+            self._flash("还没拿到目标对话，正在重新读取…")
+            self.refresh_replies_async()
+            return
+        self._read_seq += 1
+        read_seq = self._read_seq
+        reply_index = self._reply_index
+        session_path = self._read_session_path
+        selected_reply = self._replies[reply_index] if 0 <= reply_index < len(self._replies) else None
+        self._reading = True
+        self._stop_read()
+        self.btn_play.setEnabled(False)
+        self.btn_play.setText("正在生成语音…")
+        choice = "最新一条回复" if reply_index == 0 else f"前 {reply_index} 条回复"
+        self.lbl_feedback.setText("正在读 " + (self._name or "助手") + " 的" + choice + "…")
+        self.lbl_text.setText("")
+
+        def worker():
+            payload = {"ok": False, "error": None, "audio": None, "text": None, "readSeq": read_seq}
+            try:
+                request = {"replyIndex": reply_index}
+                if session_path:
+                    request["sessionPath"] = session_path
+                # 第 1~5 条带稳定身份，避免新回复插入后按序号错位；最新一条故意动态取 0。
+                if reply_index > 0 and selected_reply:
+                    entry_id = str(selected_reply.get("entryId") or "").strip()
+                    reply_ts = selected_reply.get("ts") or 0
+                    if entry_id:
+                        request["replyEntryId"] = entry_id
+                    if isinstance(reply_ts, (int, float)) and reply_ts > 0:
+                        request["replyTs"] = reply_ts
+                data = api_post("/tts/speak", request, timeout=40)
+                payload.update(data or {})
+                payload["readSeq"] = read_seq
+            except urllib.error.HTTPError as e:
+                try:
+                    body = json.loads(e.read().decode("utf-8"))
+                    payload["error"] = body.get("error") or f"出错了 ({e.code})"
+                except Exception:
+                    payload["error"] = f"出错了 ({e.code})"
+            except Exception:
+                payload["error"] = "连不上解语花，看看插件开着没"
+            if self._closed:
+                return
+            try:
+                self.read_ready.emit(payload)
+            except RuntimeError:
+                pass
+
+        threading.Thread(target=worker, daemon=True, name="jiegehua-read").start()
+
+    def _apply_read_result(self, payload):
+        if payload.get("readSeq") is not None and payload.get("readSeq") != self._read_seq:
+            return
+        if payload.get("ok") and payload.get("audio"):
+            self._last_read = {
+                "text": payload.get("text") or "",
+                "audio": payload["audio"],
+                "format": payload.get("format") or "mp3",
+                "voiceId": payload.get("voiceId") or "",
+                "replyIndex": payload.get("replyIndex", self._reply_index),
+                # 来源助手：speak 回包已带 agentId，透传进收藏，按助手分组才认得出是谁
+                "agentId": payload.get("agentId") or "",
+            }
+            if isinstance(payload.get("replyIndex"), int) and payload["replyIndex"] >= 0:
+                self._reply_index = min(payload["replyIndex"], 5)
+                self._update_reply_button()
+            self._play_audio(payload["audio"], payload.get("format") or "mp3")
+            text = payload.get("text") or ""
+            self.lbl_text.setText(text if text else "（这一段是纯符号或太短，没读到文字）")
+            self.btn_sub_fav.setText("♡ 收藏")
+            self.btn_sub_fav.setEnabled(True)
+            self.btn_play.setEnabled(True)
+            self.btn_play.setText("⏸ 暂停")
+            self._settle()
+        else:
+            self._reset_read_ui()
+            self._flash(payload.get("error") or "朗读失败，再试一次")
+            self.btn_play.setText("🔊 朗读")
+            self.lbl_text.setText("")
+
+    def replay_read(self):
+        if self._player is None or not self._media_path:
+            return
+        try:
+            self._player.setPosition(0)
+            self._player.play()
+        except Exception:
+            self._flash("重播失败，再点一次朗读试试")
+            return
+        self.btn_play.setText("⏸ 暂停")
+        self._flash("重新播放中…")
+
+    def fav_read_async(self):
+        if not self._last_read or not self._last_read.get("audio"):
+            self._flash("先朗读一次，才能收藏这段")
+            return
+        self.btn_sub_fav.setEnabled(False)
+        fav_seq = self._fav_seq
+        favorite_payload = dict(self._last_read)
+        # 保险：万一回包没带 agentId，把当前朗读目标会话路径也带上，后端能据路径推断来源助手
+        if not favorite_payload.get("agentId") and self._read_session_path:
+            favorite_payload["sessionPath"] = self._read_session_path
+
+        def worker():
+            payload = {"ok": False, "error": None, "favSeq": fav_seq}
+            try:
+                data = api_post("/tts/favorite", favorite_payload, timeout=20)
+                payload.update(data or {})
+                payload["favSeq"] = fav_seq
+            except urllib.error.HTTPError as e:
+                try:
+                    body = json.loads(e.read().decode("utf-8"))
+                    payload["error"] = body.get("error") or f"收藏失败了 ({e.code})"
+                except Exception:
+                    payload["error"] = f"收藏失败了 ({e.code})"
+            except Exception:
+                payload["error"] = "收藏失败了，再试一次"
+            if self._closed:
+                return
+            try:
+                self.fav_ready.emit(payload)
+            except RuntimeError:
+                pass
+
+        threading.Thread(target=worker, daemon=True, name="jiegehua-fav").start()
+
+    def _apply_fav_result(self, payload):
+        if "favSeq" in payload and payload.get("favSeq") != self._fav_seq:
+            return
+        try:
+            self.btn_sub_fav.setEnabled(not payload.get("ok"))
+            self.btn_sub_fav.setText("✓ 已收藏" if payload.get("ok") else "♡ 收藏")
+        except Exception:
+            pass
+        if payload.get("ok"):
+            self._flash(payload.get("message") or "已收藏 ♡ 主页「语音收藏」里能听")
+        else:
+            self._flash(payload.get("error") or "收藏失败")
+
+    def _init_player(self):
+        if self._player is not None:
+            return
+        self._player = QMediaPlayer(self)
+        self._audio_out = QAudioOutput(self)
+        self._audio_out.setVolume(1.0)
+        self._player.setAudioOutput(self._audio_out)
+        self._player.mediaStatusChanged.connect(self._on_media_status)
+        self._player.errorOccurred.connect(self._on_media_error)
+
+    def _cleanup_media_file(self):
+        p = self._media_path
+        self._media_path = None
+        if p:
+            try:
+                os.unlink(p)
+            except Exception:
+                pass
+
+    def _play_audio(self, b64_audio, fmt="mp3"):
+        try:
+            self._init_player()
+            raw = base64.b64decode(b64_audio)
+            # QtMultimedia 从 QBuffer 内存播 mp3 不稳，写临时文件再播，文件路径最稳
+            ext = "wav" if fmt == "wav" else "mp3"
+            fd, tmp_path = tempfile.mkstemp(prefix="jiegehua_read_", suffix="." + ext)
+            try:
+                with os.fdopen(fd, "wb") as fh:
+                    fh.write(raw)
+            except Exception:
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
+                raise
+            self._cleanup_media_file()
+            self._media_path = tmp_path
+            self._player.setSource(QUrl.fromLocalFile(tmp_path))
+            self._player.play()
+            self.btn_play.setEnabled(True)
+            self.btn_play.setText("⏸ 暂停")
+            self.btn_replay.setEnabled(True)
+        except Exception as e:
+            self._reset_read_ui()
+            self._flash(f"播放失败：{e}")
+
+    def _on_media_status(self, status):
+        if status == QMediaPlayer.MediaStatus.EndOfMedia:
+            self._stop_read()
+            self._reset_read_ui()
+            self._flash("读完了 · 想再听就点 ↻ 重听")
+        elif status == QMediaPlayer.MediaStatus.InvalidMedia:
+            self._reset_read_ui()
+            self._flash("音频格式不支持，换个音色试试")
+
+    def _on_media_error(self, error):
+        self._reset_read_ui()
+        self._flash("播放出错了，再试一次")
+
+    def _stop_read(self):
+        try:
+            if self._player is not None:
+                self._player.stop()
+        except Exception:
+            pass
+
+    def _reset_read_ui(self):
+        self._reading = False
+        self._cleanup_media_file()
+        try:
+            self.btn_play.setEnabled(True)
+            self.btn_play.setText("🔊 朗读")
+            self.btn_replay.setEnabled(False)
+            self.lbl_feedback.setText("")
+        except RuntimeError:
+            pass
+
+    def _flash(self, text):
+        self.lbl_feedback.setText(text)
+
+    def closeEvent(self, event):
+        self._closed = True
+        self._read_seq += 1
+        self._fav_seq += 1
+        self._target_seq += 1
+        self._replies_seq += 1
+        self._stop_read()
+        super().closeEvent(event)
+
+    def hideEvent(self, event):
+        # 收起朗读窗口 = 结束朗读，别让声音在背后自己放
+        self._read_seq += 1
+        self._fav_seq += 1
+        self._target_seq += 1
+        self._replies_seq += 1
+        self._refresh_feedback_seq = 0
+        self._auto_read_pending = False
+        self._read_session_path = ""
+        self._last_read = None
+        self.target_menu.hide()
+        self.reply_menu.hide()
+        self._stop_read()
+        self._reset_read_ui()
+        self.ball._set_fusion_panel_state("none")
+        super().hideEvent(event)
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self._drag_press = e.globalPosition().toPoint()
+            self._drag_panel_start = self.pos()
+            self._drag_ball_start = self.ball.pos()
+            self._drag_moved = False
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):
+        if self._drag_press is not None and (e.buttons() & Qt.MouseButton.LeftButton):
+            cur = e.globalPosition().toPoint()
+            delta = cur - self._drag_press
+            if not self._drag_moved:
+                if delta.manhattanLength() < QApplication.startDragDistance():
+                    return
+                self._drag_moved = True
+                self._user_dragged = True
+            screen = self.ball.screen() or QApplication.primaryScreen()
+            geo = screen.availableGeometry()
+            dx, dy = clamp_pair_drag(
+                delta.x(), delta.y(),
+                (self._drag_panel_start.x(), self._drag_panel_start.y(), self.width(), self.height()),
+                (self._drag_ball_start.x(), self._drag_ball_start.y(), self.ball.width(), self.ball.height()),
+                (geo.left(), geo.top(), geo.right() + 1, geo.bottom() + 1),
+            )
+            self.move(self._drag_panel_start + QPoint(dx, dy))
+            self.ball.move(self._drag_ball_start + QPoint(dx, dy))
+        super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            if self._drag_moved:
+                try:
+                    self.ball._save_pos()
+                except Exception:
+                    pass
+            self._drag_press = None
+            self._drag_panel_start = None
+            self._drag_ball_start = None
+            self._drag_moved = False
+        super().mouseReleaseEvent(e)
+
+    def apply_theme(self):
+        c = THEME_COLORS[self.ball.theme_mode]
+        self.setStyleSheet(f"""
+            #readPanel {{
+                background: transparent; border: none;
+                font-family: "LXGW WenKai", "Microsoft YaHei UI";
+            }}
+            QLabel {{ background: transparent; color: {c['ink']}; }}
+            QLabel#readHead {{ color: {c['accent_deep']}; font-size: 14px; font-weight: 700; }}
+            QLabel#readTargetLabel, QLabel#readReplyLabel {{ color: {c['sub_deep']}; font-size: 11px; }}
+            QLabel#readTargetInfo {{ color: {c['sub']}; font-size: 10px; padding-left: 2px; }}
+            QPushButton#readTargetBtn, QPushButton#readReplyBtn, QPushButton#readRefreshBtn {{
+                min-height: 28px; padding: 0 10px;
+                color: {c['accent_deep']}; background: {c['surface_alt']};
+                border: 1px solid {c['border']}; border-radius: 10px;
+                font-size: 11px; font-weight: 600;
+            }}
+            QPushButton#readTargetBtn:hover, QPushButton#readReplyBtn:hover, QPushButton#readRefreshBtn:hover {{
+                background: {c['surface']}; border-color: {c['accent']};
+            }}
+            QFrame#readReplyMenu {{
+                background: {c['surface_alt']}; border: 1px dashed {c['border']}; border-radius: 12px;
+            }}
+            QPushButton#replyItem {{
+                min-height: 34px; max-height: 34px; text-align: left; padding: 0 9px;
+                color: {c['ink']}; background: {c['surface']};
+                border: 1px solid {c['border']}; border-radius: 9px; font-size: 10px;
+            }}
+            QPushButton#replyItem:hover {{ background: {c['surface_alt']}; border-color: {c['accent']}; }}
+            QPushButton#replyItem[active="true"] {{
+                color: {c['accent_deep']}; background: {c['surface_alt']}; border-color: {c['accent']};
+                font-weight: 600;
+            }}
+            QLabel#readReplySub {{ color: {c['sub']}; font-size: 10px; padding: 3px 2px; }}
+            QLabel#readText {{
+                background: {c['surface_alt']}; border-radius: 10px;
+                padding: 9px 11px; font-size: 12px; line-height: 1.6;
+            }}
+            QLabel#readFeedback {{ color: {c['pink']}; font-size: 11px; font-weight: 600; }}
+            QPushButton#readCloseBtn {{
+                color: {c['sub']}; background: transparent; border: none;
+                border-radius: 12px; font-size: 13px;
+            }}
+            QPushButton#readCloseBtn:hover {{ background: {c['danger_bg']}; color: {c['pink']}; }}
+            QPushButton#readPlayBtn {{
+                min-height: 36px; color: {c['accent_text']}; background: {c['accent']};
+                border: 1px solid {c['accent']}; border-radius: 12px;
+                font-size: 13px; font-weight: 600;
+            }}
+            QPushButton#readPlayBtn:hover {{ background: {c['accent_deep']}; border-color: {c['accent_deep']}; }}
+            QPushButton#readPlayBtn:disabled {{
+                color: {c['sub']}; background: {c['surface_alt']}; border-color: {c['border']};
+            }}
+            QPushButton#readSubBtn {{
+                min-height: 28px; padding: 0 10px;
+                color: {c['accent_deep']}; background: {c['surface_alt']};
+                border: 1px solid {c['border']}; border-radius: 10px;
+                font-size: 11px; font-weight: 600;
+            }}
+            QPushButton#readSubBtn:hover {{ background: {c['surface']}; border-color: {c['accent']}; }}
+            QPushButton#readSubBtn:disabled {{ color: {c['sub']}; }}
+        """)
+        if hasattr(self, "target_menu"):
+            self.target_menu.apply_theme()
+        self._render_replies()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        c = THEME_COLORS[self.ball.theme_mode]
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        shadow = QColor(c["shadow"])
+        shadow.setAlpha(28 if self.ball.theme_mode == "light" else 52)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(shadow)
+        painter.drawRoundedRect(self.rect().adjusted(7, 8, -5, -3), 20, 20)
+
+        painter.setPen(QColor(c["border"]))
+        painter.setBrush(QColor(c["panel"]))
+        painter.drawRoundedRect(self.rect().adjusted(4, 3, -4, -6), 20, 20)
+        painter.end()
+
+
+# ─────────────────────────────
+#  我的另一枝 · 分支列表（面板内嵌）
+# ─────────────────────────────
+class BranchListMenu(QFrame):
+    """已开分支列表：数据来自代理 /branch/list；点某项打开对应聊天窗口。"""
+
+    branches_ready = pyqtSignal(object)
+
+    def __init__(self, panel):
+        super().__init__(panel)
+        self.panel = panel
+        self.ball = panel.ball
+        self.branches = []
+        self.loading = False
+        self.branches_ready.connect(self._apply_branches)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setObjectName("branchListMenu")
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._build()
+
+    def _build(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 11, 12, 11)
+        root.setSpacing(6)
+        title = QLabel("我的另一枝（点开继续聊）")
+        title.setObjectName("menuTitle")
+        root.addWidget(title)
+        self.lbl_hint = QLabel("")
+        self.lbl_hint.setObjectName("menuSub")
+        self.lbl_hint.setWordWrap(True)
+        root.addWidget(self.lbl_hint)
+        self.list_host = QWidget(self)
+        self.list_host.setObjectName("branchListHost")
+        self.list_box = QVBoxLayout(self.list_host)
+        self.list_box.setContentsMargins(0, 0, 0, 0)
+        self.list_box.setSpacing(5)
+        root.addWidget(self.list_host)
+        self.apply_theme()
+
+    def apply_theme(self):
+        c = THEME_COLORS[self.ball.theme_mode]
+        self.setStyleSheet(f"""
+            #branchListMenu {{ background: transparent; border: none; font-family: "LXGW WenKai", "Microsoft YaHei UI"; }}
+            QLabel {{ background: transparent; color: {c['ink']}; }}
+            QLabel#menuTitle {{ font-size: 13px; font-weight: 700; color: {c['accent_deep']}; }}
+            QLabel#menuSub {{ font-size: 10px; color: {c['sub']}; padding-bottom: 2px; }}
+            QWidget#branchListHost {{ background: transparent; border: none; }}
+            QPushButton#branchItem {{
+                min-height: 30px; max-height: 30px; text-align: left; padding: 0 9px;
+                color: {c['ink']}; background: {c['surface']};
+                border: 1px solid {c['border']}; border-radius: 10px; font-size: 11px;
+            }}
+            QPushButton#branchItem:hover {{ background: {c['surface_alt']}; border-color: {c['accent']}; }}
+        """)
+        self._sync_ui()
+
+    def refresh_async(self):
+        if self.loading:
+            return
+        self.loading = True
+        self.lbl_hint.setText("正在读取…")
+
+        def worker():
+            payload = {"ok": False, "branches": []}
+            try:
+                data = api_get("/branch/list", timeout=5)
+                if data.get("ok"):
+                    payload = data
+            except Exception:
+                pass
+            try:
+                self.branches_ready.emit(payload)
+            except RuntimeError:
+                pass
+
+        threading.Thread(target=worker, daemon=True, name="branch-list").start()
+
+    def _apply_branches(self, payload):
+        self.loading = False
+        self.branches = payload.get("branches") or [] if payload.get("ok") else []
+        self._sync_ui()
+
+    def _sync_ui(self):
+        self._clear_list()
+        if not self.branches:
+            self.lbl_hint.setText("还没开过另一枝，点上面的「另开一枝」试试")
+            return
+        self.lbl_hint.setText("")
+        for b in self.branches:
+            btn = QPushButton(self._item_label(b))
+            btn.setObjectName("branchItem")
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setToolTip("打开这个分支的聊天窗口")
+            btn.clicked.connect(lambda _=False, branch=b: self._open(branch))
+            self.list_box.addWidget(btn)
+
+    @staticmethod
+    def _item_label(b):
+        preview = str(b.get("preview") or "").strip()
+        when = format_branch_time(int(b.get("lastTs") or b.get("createdAt") or 0))
+        text = "另一枝 · " + when if when else "另一枝"
+        if preview:
+            text += "  " + preview
+        return text
+
+    def _open(self, branch):
+        self.panel._toggle_branch_list_off()
+        self.ball.open_branch_window(branch)
+
+    def _clear_list(self):
+        while self.list_box.count():
+            item = self.list_box.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+
+
+# ─────────────────────────────
+#  另一枝 · 独立聊天窗口
+# ─────────────────────────────
+class BranchChatWindow(QFrame):
+    """分支会话的独立聊天窗口：可随时关闭（对话保留在服务端），
+    从面板「我的另一枝」列表可重新打开；多开互不干扰。"""
+
+    history_ready = pyqtSignal(object)     # 加载 / 轮询历史回包
+    chat_sent_ready = pyqtSignal(object)   # 发送回包
+
+    WIDTH = 380
+    HEIGHT = 520
+    REPLY_POLL_MS = 1500
+    REPLY_TIMEOUT_S = 120
+
+    def __init__(self, ball, branch):
+        super().__init__(None)
+        self._closed = False
+        self.ball = ball
+        self.branch = branch
+        self.branch_id = str(branch.get("id") or "")
+        self.branch_title = str(branch.get("title") or "另一枝")
+        self._rendered = 0          # 已渲染的消息条数（轮询增量追加）
+        self._awaiting_reply = False
+        self._sending = False
+        self._poll_inflight = False
+        self._poll_started = 0.0
+        self._poll_timer = None
+        self._status_row = None     # 「正在回复…」占位行
+        self._title_bar = None
+        self._drag_press = None
+        self._drag_start = None
+
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setObjectName("chatRoot")
+        self.setFixedSize(self.WIDTH, self.HEIGHT)
+
+        self.history_ready.connect(self._apply_history)
+        self.chat_sent_ready.connect(self._apply_chat_sent)
+
+        self._build_ui()
+        self.apply_theme()
+        self._load_history_async()
+
+    # ── UI ──
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # 标题栏：拖拽移动 + 关闭
+        bar = QFrame()
+        bar.setObjectName("chatTitleBar")
+        bar.setFixedHeight(38)
+        bar.installEventFilter(self)
+        self._title_bar = bar
+        bar_layout = QHBoxLayout(bar)
+        bar_layout.setContentsMargins(14, 0, 8, 0)
+        bar_layout.setSpacing(8)
+        self.lbl_title = QLabel(self.branch_title)
+        self.lbl_title.setObjectName("chatTitle")
+        bar_layout.addWidget(self.lbl_title)
+        bar_layout.addStretch(1)
+        self.btn_close = QPushButton("✕")
+        self.btn_close.setObjectName("chatClose")
+        self.btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_close.setFixedSize(22, 22)
+        self.btn_close.setToolTip("关闭窗口（分支对话保留，可随时再打开）")
+        self.btn_close.clicked.connect(self.close)
+        bar_layout.addWidget(self.btn_close)
+        root.addWidget(bar)
+
+        # 消息滚动区
+        self.scroll = QScrollArea()
+        self.scroll.setObjectName("chatScroll")
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.body = QFrame()
+        self.body.setObjectName("chatBody")
+        self.msg_box = QVBoxLayout(self.body)
+        self.msg_box.setContentsMargins(14, 12, 14, 12)
+        self.msg_box.setSpacing(8)
+        self.msg_box.addStretch(1)
+        self.scroll.setWidget(self.body)
+        root.addWidget(self.scroll, 1)
+
+        # 输入行
+        input_bar = QFrame()
+        input_bar.setObjectName("chatInputBar")
+        input_bar.setFixedHeight(52)
+        input_layout = QHBoxLayout(input_bar)
+        input_layout.setContentsMargins(14, 8, 14, 8)
+        input_layout.setSpacing(8)
+        self.input = QLineEdit()
+        self.input.setObjectName("chatInput")
+        self.input.setMaxLength(500)
+        self.input.setPlaceholderText("和分支里的小花聊两句…")
+        self.input.returnPressed.connect(self._send_text)
+        input_layout.addWidget(self.input, 1)
+        self.btn_send = QPushButton("发送")
+        self.btn_send.setObjectName("chatSend")
+        self.btn_send.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_send.setFixedWidth(64)
+        self.btn_send.clicked.connect(self._send_text)
+        input_layout.addWidget(self.btn_send)
+        root.addWidget(input_bar)
+
+    def apply_theme(self):
+        c = THEME_COLORS[self.ball.theme_mode]
+        self.setStyleSheet(f"""
+            #chatRoot {{
+                background: {c['panel']};
+                border: 1px solid {c['border']};
+                border-radius: 14px;
+                font-family: "LXGW WenKai", "Microsoft YaHei UI";
+            }}
+            #chatTitleBar {{ background: {c['surface_alt']}; border-top-left-radius: 14px; border-top-right-radius: 14px; }}
+            #chatTitle {{ color: {c['accent_deep']}; font-size: 13px; font-weight: 700; background: transparent; }}
+            #chatClose {{
+                color: {c['sub']}; background: transparent; border: none;
+                border-radius: 11px; font-size: 12px; font-weight: 700;
+            }}
+            #chatClose:hover {{ color: {c['accent_text']}; background: {c['accent']}; }}
+            QScrollArea#chatScroll {{ background: transparent; border: none; }}
+            QWidget#chatBody {{ background: transparent; }}
+            QLabel#bubbleUser {{
+                background: {c['accent']}; color: {c['accent_text']};
+                border-radius: 12px; padding: 8px 12px; font-size: 12px;
+            }}
+            QLabel#bubbleAssistant {{
+                background: {c['surface']}; color: {c['ink']};
+                border: 1px solid {c['border']}; border-radius: 12px;
+                padding: 8px 12px; font-size: 12px;
+            }}
+            QLabel#bubbleStatus {{ color: {c['sub']}; font-size: 11px; background: transparent; }}
+            #chatInputBar {{ background: {c['surface_alt']}; border-bottom-left-radius: 14px; border-bottom-right-radius: 14px; }}
+            #chatInput {{
+                min-height: 32px; padding: 0 12px;
+                color: {c['ink']}; background: {c['surface']};
+                border: 1px solid {c['border']}; border-radius: 12px; font-size: 12px;
+            }}
+            #chatInput:focus {{ border-color: {c['accent']}; }}
+            #chatSend {{
+                min-height: 32px; color: {c['accent_text']}; background: {c['accent']};
+                border: 1px solid {c['accent']}; border-radius: 12px; font-size: 12px; font-weight: 600;
+            }}
+            #chatSend:hover {{ background: {c['accent_deep']}; border-color: {c['accent_deep']}; }}
+            #chatSend:disabled {{ color: {c['sub']}; background: {c['surface_alt']}; border-color: {c['border']}; }}
+        """)
+
+    # ── 事件：标题栏拖拽 ──
+    def eventFilter(self, obj, event):
+        if obj is self._title_bar:
+            etype = event.type()
+            if etype == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+                self._drag_press = event.globalPosition().toPoint()
+                self._drag_start = self.pos()
+                return True
+            if etype == QEvent.Type.MouseMove and self._drag_press is not None:
+                if event.buttons() & Qt.MouseButton.LeftButton:
+                    delta = event.globalPosition().toPoint() - self._drag_press
+                    self.move(self._drag_start + delta)
+                    return True
+            if etype == QEvent.Type.MouseButtonRelease:
+                self._drag_press = None
+        return super().eventFilter(obj, event)
+
+    # ── 消息渲染 ──
+    def _append_message(self, role, text):
+        bubble = QLabel(text)
+        bubble.setObjectName("bubbleUser" if role == "user" else "bubbleAssistant")
+        bubble.setWordWrap(True)
+        bubble.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        bubble.setMaximumWidth(int(self.WIDTH * 0.72))
+        row = QHBoxLayout()
+        row.setSpacing(0)
+        if role == "user":
+            row.addStretch(1)
+            row.addWidget(bubble)
+        else:
+            row.addWidget(bubble)
+            row.addStretch(1)
+        self.msg_box.insertLayout(self.msg_box.count() - 1, row)
+        self._scroll_bottom()
+
+    def _append_status(self, text):
+        self._clear_status()
+        lbl = QLabel(text)
+        lbl.setObjectName("bubbleStatus")
+        row = QHBoxLayout()
+        row.setSpacing(0)
+        row.addWidget(lbl)
+        row.addStretch(1)
+        self._status_row = row
+        self.msg_box.insertLayout(self.msg_box.count() - 1, row)
+        self._scroll_bottom()
+
+    def _clear_status(self):
+        if self._status_row is not None:
+            while self._status_row.count():
+                item = self._status_row.takeAt(0)
+                w = item.widget()
+                if w:
+                    w.deleteLater()
+            self.msg_box.removeItem(self._status_row)
+            self._status_row = None
+
+    def _scroll_bottom(self):
+        bar = self.scroll.verticalScrollBar()
+        QTimer.singleShot(0, lambda: None if self._closed else bar.setValue(bar.maximum()))
+
+    # ── 历史加载 ──
+    def _load_history_async(self):
+        branch_id = self.branch_id
+
+        def worker():
+            payload = {"ok": False, "messages": []}
+            try:
+                data = api_get("/branch/history?branchId=" + urllib.parse.quote(branch_id), timeout=6)
+                if data.get("ok"):
+                    payload = data
+            except Exception:
+                pass
+            if self._closed:
+                return
+            try:
+                self.history_ready.emit(payload)
+            except RuntimeError:
+                pass
+
+        threading.Thread(target=worker, daemon=True, name="branch-history").start()
+
+    # ── 发送 ──
+    def _send_text(self):
+        if self._sending:
+            return
+        text = self.input.text().strip()
+        if not text:
+            return
+        self.input.clear()
+        self._sending = True
+        self.btn_send.setEnabled(False)
+        self._append_message("user", text)
+        self._append_status("正在回复…")
+        self._poll_started = time.monotonic()
+        branch_id = self.branch_id
+
+        def worker():
+            payload = {"ok": False, "error": "连不上解语花，看看插件开着没"}
+            try:
+                data = api_post("/branch/chat", {"branchId": branch_id, "text": text}, timeout=20)
+                payload.update(data or {})
+            except urllib.error.HTTPError as e:
+                try:
+                    payload.update(json.loads(e.read().decode("utf-8", "replace")) or {})
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            if self._closed:
+                return
+            try:
+                self.chat_sent_ready.emit(payload)
+            except RuntimeError:
+                pass
+
+        threading.Thread(target=worker, daemon=True, name="branch-chat-send").start()
+
+    def _apply_chat_sent(self, payload):
+        if not payload.get("ok"):
+            self._clear_status()
+            self._append_status(payload.get("error") or "发送失败，再试一次")
+            self._sending = False
+            self.btn_send.setEnabled(True)
+            return
+        # 发送成功：轮询分支会话，等助手新消息
+        self._awaiting_reply = True
+        self._poll_timer = QTimer(self)
+        self._poll_timer.timeout.connect(self._poll_reply)
+        self._poll_timer.start(self.REPLY_POLL_MS)
+        self._poll_reply()
+
+    def _poll_reply(self):
+        if self._closed or self._poll_inflight or not self._awaiting_reply:
+            return
+        self._poll_inflight = True
+        branch_id = self.branch_id
+
+        def worker():
+            payload = {"ok": False, "messages": []}
+            try:
+                data = api_get("/branch/history?branchId=" + urllib.parse.quote(branch_id), timeout=5)
+                if data.get("ok"):
+                    payload = data
+            except Exception:
+                pass
+            if self._closed:
+                return
+            try:
+                self.history_ready.emit(payload)
+            except RuntimeError:
+                pass
+
+        threading.Thread(target=worker, daemon=True, name="branch-poll").start()
+
+    def _apply_history(self, payload):
+        if self._closed:
+            return
+        self._poll_inflight = False
+        if not payload.get("ok"):
+            if self._awaiting_reply:
+                self._finish_reply(payload.get("error") or "回复获取失败，再试一次")
+            else:
+                self._append_status(payload.get("error") or "分支历史加载失败")
+            return
+        messages = payload.get("messages") or []
+        if self._awaiting_reply:
+            # 轮询模式：增量追加；出现新的助手消息即完成
+            if len(messages) > self._rendered:
+                for m in messages[self._rendered:]:
+                    self._append_message(m.get("role"), m.get("content") or "")
+                self._rendered = len(messages)
+            last = messages[-1] if messages else {}
+            if last.get("role") == "assistant":
+                self._finish_reply("")
+                return
+            if time.monotonic() - self._poll_started > self.REPLY_TIMEOUT_S:
+                self._finish_reply("小花好像还没回，看看 Hana 那边是不是卡了")
+            return
+        # 初次加载：全量渲染
+        if not messages:
+            self._append_status("从这里开始聊吧")
+            return
+        for m in messages:
+            self._append_message(m.get("role"), m.get("content") or "")
+        self._rendered = len(messages)
+
+    def closeEvent(self, event):
+        self._closed = True
+        self._awaiting_reply = False
+        self._sending = False
+        self._poll_inflight = False
+        if self._poll_timer is not None:
+            self._poll_timer.stop()
+            self._poll_timer = None
+        super().closeEvent(event)
+
+    def _finish_reply(self, error_msg):
+        if self._closed:
+            return
+        self._awaiting_reply = False
+        self._sending = False
+        self.btn_send.setEnabled(True)
+        self._clear_status()
+        if self._poll_timer is not None:
+            self._poll_timer.stop()
+            self._poll_timer = None
+        if error_msg:
+            self._append_status(error_msg)
+
+
 def main():
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough

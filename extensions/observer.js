@@ -16,6 +16,7 @@ import path from "node:path";
 import os from "node:os";
 import { listAskPending, queueAskSkip } from "../lib/data.js";
 import { lastUserMessageTs } from "../lib/session.js";
+import { supportsInteractiveCard } from "../lib/suggestion-card.js";
 
 const HANA_HOME = process.env.HANA_HOME || path.join(os.homedir(), ".hanako");
 const DATA_DIR = path.join(HANA_HOME, "plugin-data", "jiegehua");
@@ -51,24 +52,45 @@ function readConfig() {
   }
 }
 
-// 用户消息尾部的行动提示（通道 B）
-// v6（2026-08-06）：实测 v4/v5「先写正文最后调工具」对 deepseek-v4-flash 不稳定——
-// 模型 thinking 里计划了调用，但最终输出只写文本就结束，toolCall 被吞。
-// 模型默认「先调工具再写正文」模式执行稳定，v6 顺应模型习惯：先调工具，后写正文。
-const ALWAYS_NUDGE = "\n\n💡 请先调用 suggest_replies 工具生成推荐回复（在写正文之前），然后再正常写你的回复正文。推荐卡片会自动显示，正文里不需要提及它。";
-const AUTO_NUDGE = "\n\n💡 如果你觉得这轮回复后用户可能还想继续聊：先调用 suggest_replies 工具生成推荐回复（在写正文之前），然后再写回复正文。";
+function readHanaAppVersion() {
+  try {
+    const info = JSON.parse(fs.readFileSync(path.join(HANA_HOME, "server-info.json"), "utf8"));
+    return typeof info?.version === "string" ? info.version : "";
+  } catch {
+    return "";
+  }
+}
 
-// system 消息（通道 A）
-const ALWAYS_SYSTEM = "（解语花）写正文之前，先调用 suggest_replies 工具生成推荐回复，然后再写正文。";
-const AUTO_SYSTEM = "（解语花）如果这轮回复后用户可能还想继续聊：写正文之前，先调用 suggest_replies 工具。";
+function cardGuidance() {
+  if (supportsInteractiveCard(readHanaAppVersion())) {
+    return {
+      alwaysNudge: "\n\n💡 请先正常写完你的回复正文，正文结束后调用 suggest_replies 生成推荐数据；工具返回后，立即调用内置 show_card，把它返回的参数原样传入。show_card 必须是最后一步，正文里不需要提及卡片。",
+      autoNudge: "\n\n💡 如果你觉得这轮回复后用户可能还想继续聊：请先正常写完回复正文，之后调用 suggest_replies；工具返回后立即调用内置 show_card，把返回参数原样传入，且让 show_card 作为最后一步。",
+      alwaysSystem: "（解语花）请先写完正文；正文结束后调用 suggest_replies，随后立即调用内置 show_card 原样传入工具返回参数。show_card 必须是最后一步，才能得到真正的内联卡片。",
+      autoSystem: "（解语花）如果这轮回复后用户可能还想继续聊：请先写完正文，调用 suggest_replies 后立即调用内置 show_card；show_card 必须是最后一步。",
+    };
+  }
+  return {
+    alwaysNudge: "\n\n💡 请先正常写完你的回复正文，正文结束后调用 suggest_replies 生成推荐数据；工具会自动把推荐卡片附在回复下方，正文里不需要提及卡片。",
+    autoNudge: "\n\n💡 如果你觉得这轮回复后用户可能还想继续聊：请先正常写完回复正文，之后调用 suggest_replies；工具会自动把推荐卡片附在回复下方。",
+    alwaysSystem: "（解语花）请先写完正文；正文结束后调用 suggest_replies，工具会自动附上推荐卡片，不需要调用其他卡片工具。",
+    autoSystem: "（解语花）如果这轮回复后用户可能还想继续聊：请先写完正文，之后调用 suggest_replies；旧版宿主会自动附上推荐卡片。",
+  };
+}
 
 // ── ask 引导（悬浮球模式专用） ──
 // ball 模式下不注入 suggest_replies（悬浮球自己管推荐区），但 ask_user_choice
 // 没有别的提示通道：工具描述只在工具列表里，flash 模型在长工具列表里容易漏
 //（2026-08-16 实测实锤：其他助手会话需要拍板却纯文本提问，弹窗没出现）。
 // 这里注入一条条件式引导，让所有助手的会话（不只小花）需要拍板时都能想起调用它。
-const ASK_NUDGE = "\n\n💡 如果这轮需要用户拍板、做选择或确认方向：写正文之前，先调用 ask_user_choice 工具，把问题和选项传进去（悬浮球会弹出提问面板）。";
-const ASK_SYSTEM = "（解语花）如果这轮需要用户拍板或选择：写正文前先调用 ask_user_choice 工具，让悬浮球弹出提问面板。";
+// 2026-08-22 修正：措辞优先级从「写正文之前先弹」改为「先自然写完正文、确实需要拍板再弹」。
+// 实测（deepseek-v4-flash-vision-exp，各 3 遍）：改前后该拍板命中率都 100%，
+// 但改前弹窗时正文空 6/9（模型一弹窗就不说话），改后正文空 0/9。
+// 病灶是「弹窗优先」那句教模型把弹窗当正事、可选可无。
+// 2026-08-22 二次修正：加意图分流，禁止把「想了解/想判断」话题改写成选择题。
+// 实测：普通对话（解释/判断/闲聊）全部不弹窗且保留正文，拍板场景仍稳定弹窗。
+const ASK_NUDGE = "\n\n💡 先看用户这轮是「想了解/想判断」还是「要你拍板」。前者是普通对话，直接清楚回答，绝不包装成选项让人选；只有用户明确让你在几个选项里选定、确认要不要做时，才调用 ask_user_choice 弹出提问面板。先自然写完正文，别为弹窗打断，也别把话题硬抛成选择题。";
+const ASK_SYSTEM = "（解语花）先判断用户这轮的真实意图：\n- 用户在问知识、要解释、要你判断或给看法：直接清楚回答，这是普通对话，不要弹窗。\n- 用户在闲聊、倾诉、分享：自然接话就好，不要弹窗。\n- 只有用户明确让你在几个选项里选定、确认要不要做某件事、或明确让你帮他拍板时：才调用 ask_user_choice 弹出提问面板。\n绝不把「想了解/想判断」的话题改写成选择题来让用户选。先自然写完正文，确实需要拍板再弹窗。";
 
 function injectAsk(event) {
   if (!Array.isArray(event?.messages)) return false;
@@ -89,8 +111,9 @@ function injectAsk(event) {
 
 function inject(event, cfg) {
   const isAlways = cfg.mode === "always";
-  const nudge = isAlways ? ALWAYS_NUDGE : AUTO_NUDGE;
-  const sysMsg = isAlways ? ALWAYS_SYSTEM : AUTO_SYSTEM;
+  const guidance = cardGuidance();
+  const nudge = isAlways ? guidance.alwaysNudge : guidance.autoNudge;
+  const sysMsg = isAlways ? guidance.alwaysSystem : guidance.autoSystem;
 
   // 通道 A：system 消息
   if (Array.isArray(event?.messages)) {

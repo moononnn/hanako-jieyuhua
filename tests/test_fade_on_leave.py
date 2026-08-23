@@ -1,22 +1,15 @@
-import importlib.util
-import os
-import pathlib
 import unittest
 
 from PyQt6.QtCore import QAbstractAnimation
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-MODULE_PATH = pathlib.Path(__file__).parents[1] / "python" / "zhujian_app.py"
-SPEC = importlib.util.spec_from_file_location("zhujian_app", MODULE_PATH)
-zhujian = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(zhujian)
+from _zhujian_test_support import QtTestCase, zhujian
 
 
 class FadeHost(zhujian.FadeOnLeaveMixin, zhujian.QFrame):
     """测试宿主：仅挂 fade mixin，不带业务 UI。"""
 
 
-class FadeOnLeaveTests(unittest.TestCase):
+class FadeOnLeaveTests(QtTestCase):
     def _make(self, cursor_inside):
         app = zhujian.QApplication.instance() or zhujian.QApplication([])
         host = FadeHost()
@@ -110,9 +103,9 @@ class FadeOnLeaveTests(unittest.TestCase):
         self.assertEqual(menu.windowOpacity(), 1.0)
         self.assertFalse(menu._fade_out_timer.isActive())
         # 退出提问态恢复推荐 → fade 恢复正常
-        menu._ask_responding = True
+        menu._ask_responding = False
         menu._ask_finished = True
-        menu.restore_recommendations("ask-solid-2")
+        menu.finish_ask_and_collapse("ask-solid-2")
         app.processEvents()
         self.assertFalse(menu.is_ask_open())
         menu._on_fade_leave()
