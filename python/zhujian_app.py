@@ -116,9 +116,12 @@ class AskOptionFrame(QFrame):
     # 提问作答强制直接回传：点击选项/发送按钮走 /ask/respond 的 deferred 通道，
     # 与推荐条的「直接发出/复制到剪贴板」模式（ball.action）完全无关，
     # 复制模式的用户点这里也是直接作答。改这条链路时不要接进 ball.action 分支。
-    def __init__(self, label, description="", recommended=False):
+    def __init__(self, label, description="", recommended=False, selection_mode="single"):
         super().__init__()
         self.setObjectName("askOption")
+        self._label = label
+        self._selection_mode = selection_mode if selection_mode == "multiple" else "single"
+        self._selected = False
         # 垂直 Expanding：同排选项在 QGridLayout 里等高（行高取最高卡片），文字超了整排一起放大
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         layout = QVBoxLayout(self)
@@ -142,6 +145,25 @@ class AskOptionFrame(QFrame):
             layout.addWidget(detail)
         # 弹性吸收：等高拉伸后内容顶部对齐，底部空白均匀
         layout.addStretch(1)
+        self.set_selected(False)
+
+    def set_selected(self, selected):
+        self._selected = bool(selected)
+        if self._selection_mode == "multiple":
+            prefix = "☑ " if self._selected else "□ "
+            self.choice_label.setText(prefix + self._label)
+            self.choice_label.setAccessibleName(("已选：" if self._selected else "未选：") + self._label)
+        else:
+            self.choice_label.setText(self._label)
+            self.choice_label.setAccessibleName(self._label)
+        self.setProperty("selected", "true" if self._selected else "false")
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.update()
+
+    @property
+    def selected(self):
+        return self._selected
 
 
 def latest_ask_pending(pending):
@@ -196,6 +218,11 @@ SWEEP_FADE_START = 24.0
 SWEEP_MIN_SPEED = 45.0
 SWEEP_PETAL_SPEED = 210.0
 MAX_PETAL_PARTICLES = 48
+# 拖动响应按窗口真实位移采样；原版与融合版共用同一组目标/弹簧语义。
+DRAG_MAX_SPEED = 2400.0
+DRAG_FILTER_TAU = 0.035
+DRAG_STALE_AFTER = 0.055
+DRAG_DECAY_TAU = 0.10
 
 # ── 鼠标 hover 滞回 ──
 EDGE_INSET = 16
@@ -309,6 +336,24 @@ def position_popup_beside(anchor_rect, popup_size, bounds, gap=8, anchor_ratio=0
     )
 
 
+def position_popup_left_first(anchor_rect, popup_size, bounds, gap=8, anchor_ratio=0.5):
+    """优先放锚点左侧，左侧放不下才放右侧；返回 (x, y, side)。"""
+    ax, _ay, aw, ah = anchor_rect
+    pw, ph = popup_size
+    left, top, right, bottom = bounds
+    left_x = ax - pw - gap
+    right_x = ax + aw + gap
+    if left_x >= left:
+        x, side = left_x, "left"
+    else:
+        x, side = right_x, "right"
+    return (
+        max(left, min(x, right - pw)),
+        popup_anchor_y(anchor_rect, ph, bounds, anchor_ratio),
+        side,
+    )
+
+
 def clamp_position(x, y, width, height, left, top, right, bottom, inset=EDGE_INSET):
     min_x = left + inset
     min_y = top + inset
@@ -419,6 +464,72 @@ def calculate_cursor_sweep(previous_x, previous_y, current_x, current_y, elapsed
         direction = -1.0 if dy > 0.0 else 1.0
     strength = sweep_strength_from_speed(speed)
     return direction, strength, speed, dx / seconds, dy / seconds
+
+
+def sample_drag_velocity(
+    previous_x,
+    previous_y,
+    previous_ts,
+    previous_vx,
+    previous_vy,
+    current_x,
+    current_y,
+    current_ts,
+):
+    """从窗口真实位移估算平滑拖速；触边限位后不再凭鼠标继续加速。"""
+    elapsed = max(float(current_ts) - float(previous_ts), 1.0 / 240.0)
+    raw_vx = (float(current_x) - float(previous_x)) / elapsed
+    raw_vy = (float(current_y) - float(previous_y)) / elapsed
+    raw_speed = math.hypot(raw_vx, raw_vy)
+    if raw_speed > DRAG_MAX_SPEED:
+        scale = DRAG_MAX_SPEED / raw_speed
+        raw_vx *= scale
+        raw_vy *= scale
+    alpha = 1.0 - math.exp(-min(elapsed, 0.12) / DRAG_FILTER_TAU)
+    if math.hypot(float(previous_vx), float(previous_vy)) < 1.0:
+        alpha = max(alpha, 0.62)
+    vx = float(previous_vx) + (raw_vx - float(previous_vx)) * alpha
+    vy = float(previous_vy) + (raw_vy - float(previous_vy)) * alpha
+    return vx, vy, vx - float(previous_vx), vy - float(previous_vy), math.hypot(vx, vy)
+
+
+def flower_drag_targets(velocity_x, velocity_y):
+    """把拖速翻译成柔性层目标：根部最稳，花冠次之，轻叶拖尾最大。"""
+    vx = float(velocity_x)
+    vy = float(velocity_y)
+    return (
+        max(-7.2, min(-vx * 0.0048, 7.2)),
+        max(-13.5, min(-vx * 0.0092, 13.5)),
+        max(-19.0, min(-vx * 0.0130, 19.0)),
+        max(-4.8, min(-vy * 0.0036, 4.8)),
+    )
+
+
+def flower_drag_impulses(delta_vx, delta_vy):
+    """加速/急停产生的局部惯性，越轻的部件获得越大的速度变化。"""
+    dvx = float(delta_vx)
+    dvy = float(delta_vy)
+    return (
+        max(-18.0, min(-dvx * 0.018, 18.0)),
+        max(-34.0, min(-dvx * 0.036, 34.0)),
+        max(-50.0, min(-dvx * 0.055, 50.0)),
+        max(-20.0, min(-dvy * 0.018, 20.0)),
+    )
+
+
+def advance_motion_spring(value, velocity, target, stiffness, damping, dt, limit):
+    """可中断的局部弹簧；拖动反向时沿用现有速度，不重启动画。"""
+    dt = max(0.0, min(float(dt), 0.05))
+    acceleration = (
+        (float(target) - float(value)) * float(stiffness)
+        - float(velocity) * float(damping)
+    )
+    velocity = float(velocity) + acceleration * dt
+    value = float(value) + velocity * dt
+    value = max(-abs(float(limit)), min(value, abs(float(limit))))
+    if abs(value) < 0.001 and abs(velocity) < 0.01 and abs(float(target)) < 0.001:
+        return 0.0, 0.0
+    return value, velocity
 
 
 def petal_count_from_sweep_speed(speed):
@@ -1081,6 +1192,15 @@ class ZhujianBall(QWidget):
         self.cursor_lift = 0.0
         self.cursor_velocity = (0.0, 0.0)
         self.bloom = 0.0
+        # 拖动时根部、花冠、叶片与纵向位移各有独立重量；释放后保留速度回弹。
+        self.drag_branch_angle = 0.0
+        self.drag_branch_velocity = 0.0
+        self.drag_flower_angle = 0.0
+        self.drag_flower_velocity = 0.0
+        self.drag_leaf_angle = 0.0
+        self.drag_leaf_velocity = 0.0
+        self.drag_vertical = 0.0
+        self.drag_vertical_velocity = 0.0
 
         # 三态
         self.mode = "rolled"
@@ -1105,6 +1225,13 @@ class ZhujianBall(QWidget):
         self._last_ts = time.monotonic()
         cursor = QCursor.pos()
         self._cursor_sample = (cursor.x(), cursor.y(), self._last_ts)
+        self._drag_motion_active = False
+        self._drag_sample_x = 0.0
+        self._drag_sample_y = 0.0
+        self._drag_sample_ts = self._last_ts
+        self._drag_velocity_x = 0.0
+        self._drag_velocity_y = 0.0
+        self._drag_motion_last_ts = self._last_ts
 
         # 交互
         self._drag = None
@@ -1284,6 +1411,79 @@ class ZhujianBall(QWidget):
         self.state["fusionPanel"] = panel
         save_state(self.state)
 
+    def _reset_drag_motion(self, now=None):
+        now = time.monotonic() if now is None else float(now)
+        pos = self.pos()
+        self._drag_sample_x = float(pos.x())
+        self._drag_sample_y = float(pos.y())
+        self._drag_sample_ts = now
+        self._drag_velocity_x = 0.0
+        self._drag_velocity_y = 0.0
+        self._drag_motion_last_ts = now
+        self._drag_motion_active = False
+
+    def _apply_drag_impulses(self, delta_vx, delta_vy):
+        branch, flower, leaf, vertical = flower_drag_impulses(delta_vx, delta_vy)
+        self.drag_branch_velocity += branch
+        self.drag_flower_velocity += flower
+        self.drag_leaf_velocity += leaf
+        self.drag_vertical_velocity += vertical
+
+    def _record_drag_motion(self, position=None, now=None):
+        now = time.monotonic() if now is None else float(now)
+        position = self.pos() if position is None else position
+        vx, vy, dvx, dvy, _speed = sample_drag_velocity(
+            self._drag_sample_x,
+            self._drag_sample_y,
+            self._drag_sample_ts,
+            self._drag_velocity_x,
+            self._drag_velocity_y,
+            position.x(),
+            position.y(),
+            now,
+        )
+        self._drag_sample_x = float(position.x())
+        self._drag_sample_y = float(position.y())
+        self._drag_sample_ts = now
+        self._drag_velocity_x = vx
+        self._drag_velocity_y = vy
+        self._drag_motion_last_ts = now
+        self._drag_motion_active = True
+        self._apply_drag_impulses(dvx, dvy)
+
+    def _release_drag_motion(self):
+        if self._drag_motion_active:
+            # 极短 flick 也要留下滞后；急停冲量只抵消一部分起步冲量，剩余交给弹簧自然回正。
+            self._apply_drag_impulses(
+                -self._drag_velocity_x * 0.30,
+                -self._drag_velocity_y * 0.30,
+            )
+        self._drag_velocity_x *= 0.25
+        self._drag_velocity_y *= 0.25
+        self._drag_motion_active = False
+        self._drag_motion_last_ts = time.monotonic()
+
+    def _decay_drag_motion(self, now, dt):
+        fresh = (
+            self._drag_motion_active
+            and now - self._drag_motion_last_ts <= DRAG_STALE_AFTER
+        )
+        if fresh:
+            return
+        decay = math.exp(-dt / DRAG_DECAY_TAU)
+        self._drag_velocity_x *= decay
+        self._drag_velocity_y *= decay
+        if math.hypot(self._drag_velocity_x, self._drag_velocity_y) < 0.5:
+            self._drag_velocity_x = 0.0
+            self._drag_velocity_y = 0.0
+
+    def _cancel_press_for_drag(self):
+        """越过拖动阈值后结束点击蓄力，不把拖拽松手误演成一次完整点击爆瓣。"""
+        if not self.pressed:
+            return
+        self.pressed = False
+        self.press_velocity = min(self.press_velocity, -3.4)
+
     # ── 动画帧 ──
     def _tick(self):
         now = time.monotonic()
@@ -1291,6 +1491,53 @@ class ZhujianBall(QWidget):
         dt = min(frame_elapsed, 0.05)
         self._last_ts = now
         self.t += dt
+        self._decay_drag_motion(now, dt)
+        dragging = bool(
+            self._drag_motion_active
+            and now - self._drag_motion_last_ts <= 0.18
+        )
+        (
+            drag_branch_target,
+            drag_flower_target,
+            drag_leaf_target,
+            drag_vertical_target,
+        ) = flower_drag_targets(self._drag_velocity_x, self._drag_velocity_y)
+        self.drag_branch_angle, self.drag_branch_velocity = advance_motion_spring(
+            self.drag_branch_angle,
+            self.drag_branch_velocity,
+            drag_branch_target,
+            58.0,
+            12.5,
+            dt,
+            7.5,
+        )
+        self.drag_flower_angle, self.drag_flower_velocity = advance_motion_spring(
+            self.drag_flower_angle,
+            self.drag_flower_velocity,
+            drag_flower_target,
+            40.0,
+            8.0,
+            dt,
+            14.0,
+        )
+        self.drag_leaf_angle, self.drag_leaf_velocity = advance_motion_spring(
+            self.drag_leaf_angle,
+            self.drag_leaf_velocity,
+            drag_leaf_target,
+            30.0,
+            6.8,
+            dt,
+            20.0,
+        )
+        self.drag_vertical, self.drag_vertical_velocity = advance_motion_spring(
+            self.drag_vertical,
+            self.drag_vertical_velocity,
+            drag_vertical_target,
+            52.0,
+            11.0,
+            dt,
+            5.0,
+        )
 
         # 透明异形窗可能漏 enter/leave，每帧读全局光标判定（滞回）
         cursor_global = QCursor.pos()
@@ -1349,7 +1596,11 @@ class ZhujianBall(QWidget):
             self.cursor_wind *= math.exp(-dt / 0.16)
             self.cursor_lift *= math.exp(-dt / 0.16)
             self.cursor_velocity = (0.0, 0.0)
-            resting_strength = 0.24 if cursor_hovered and not self.pressed else 0.0
+            resting_strength = (
+                0.24
+                if cursor_hovered and not self.pressed and not dragging
+                else 0.0
+            )
             self.hover_strength += (resting_strength - self.hover_strength) * (
                 1.0 - math.exp(-dt / 0.30)
             )
@@ -1360,7 +1611,7 @@ class ZhujianBall(QWidget):
         self._sweep_petal_cooldown = max(0.0, self._sweep_petal_cooldown - dt)
 
         # 悬停风来得快、散得慢；和风铃一样保留一小段余韵
-        wind_target = 1.0 if self.hovered else 0.0
+        wind_target = 0.12 if dragging else 1.0 if self.hovered else 0.0
         wind_tau = 0.14 if self.hovered else 1.10
         self.hover_wind += (wind_target - self.hover_wind) * (1.0 - math.exp(-dt / wind_tau))
         self.gust *= math.exp(-dt / 0.68)
@@ -1436,7 +1687,12 @@ class ZhujianBall(QWidget):
         branch_offset, _, _ = component_motion(
             self.t, self.bloom, effective_gust, effective_direction, rebound,
         )
-        return self.angle * 0.42 + branch_offset * 0.55 + self.press_amount * 4.8
+        return (
+            self.angle * 0.42
+            + branch_offset * 0.55
+            + self.press_amount * 4.8
+            + self.drag_branch_angle
+        )
 
     def _flower_origin(self):
         return rotate_point_around(
@@ -1540,10 +1796,15 @@ class ZhujianBall(QWidget):
         if not self.layered_flower_ready:
             if not self._draw_layer(
                 p, self.pix_flower, FLOWER_SIZE,
-                self.angle, FLOWER_CENTER[0], FLOWER_CENTER[1] + lift, 1.0,
+                self.angle + self.drag_flower_angle,
+                FLOWER_CENTER[0],
+                FLOWER_CENTER[1] + lift + self.drag_vertical,
+                1.0,
             ):
                 self._draw_fallback_flower(
-                    p, FLOWER_CENTER[0], FLOWER_CENTER[1] + lift,
+                    p,
+                    FLOWER_CENTER[0],
+                    FLOWER_CENTER[1] + lift + self.drag_vertical,
                     FLOWER_SIZE / 47.0,
                 )
             return
@@ -1555,7 +1816,7 @@ class ZhujianBall(QWidget):
         _, flower_offset, leaf_offset = component_motion(
             self.t, self.bloom, effective_gust, effective_direction, rebound,
         )
-        vertical_offset = self.cursor_lift * 2.8 * motion_scale
+        vertical_offset = self.cursor_lift * 2.8 * motion_scale + self.drag_vertical
         branch_angle = self._branch_angle()
 
         # 整枝绕画外树身连接处弯下；松手后 press_amount 越过 0，形成快速回弹。
@@ -1567,11 +1828,11 @@ class ZhujianBall(QWidget):
             p, self.pix_branch, BRANCH_SIZE, 0.0, BALL_SIZE / 2, BALL_SIZE / 2,
         )
         self._draw_layer(
-            p, self.pix_leaf, LEAF_SIZE, leaf_offset,
+            p, self.pix_leaf, LEAF_SIZE, leaf_offset + self.drag_leaf_angle,
             LEAF_CENTER[0], LEAF_CENTER[1] + lift * 0.35 + vertical_offset * 0.45,
         )
         self._draw_layer(
-            p, self.pix_flower, FLOWER_SIZE, flower_offset,
+            p, self.pix_flower, FLOWER_SIZE, flower_offset + self.drag_flower_angle,
             FLOWER_CENTER[0], FLOWER_CENTER[1] + lift + vertical_offset, 1.0,
         )
         p.restore()
@@ -1651,6 +1912,7 @@ class ZhujianBall(QWidget):
             self._press_global = e.globalPosition().toPoint()
             self._drag = self._press_global - self.pos()
             self._moved = False
+            self._reset_drag_motion()
             self._begin_press_effect()
         e.accept()
 
@@ -1662,22 +1924,28 @@ class ZhujianBall(QWidget):
                     e.accept()
                     return
                 self._moved = True
+                self._cancel_press_for_drag()
             delta = current - self._press_global
             if self._drag_menu_was_visible or self._drag_read_was_visible:
                 self._sync_dragged_popups(delta)
             else:
                 self.move(current - self._drag)
+                self._ensure_visible()
+            self._record_drag_motion()
         e.accept()
 
     def mouseReleaseEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
             self._end_press_effect()
             if self._moved:
+                self._release_drag_motion()
                 self._snap()
                 self._sync_dragged_popups()
                 self._save_pos()
             else:
                 self._toggle_expand()
+            if not self._moved:
+                self._drag_motion_active = False
             self._drag = None
             self._press_global = None
             self._drag_menu_was_visible = False
@@ -1720,6 +1988,8 @@ class ZhujianBall(QWidget):
             (geo.left(), geo.top(), geo.right() + 1, geo.bottom() + 1),
         )
         self.move(self._drag_ball_start + QPoint(dx, dy))
+        # 球带着面板移动也算用户手动调整；延迟布局回调不能再按左优先规则把面板拽走。
+        popup._user_dragged = True
         popup.move(popup_start + QPoint(dx, dy))
         if not popup.isVisible():
             popup.show()
@@ -1866,6 +2136,11 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
         # ask 挂起期间允许面板暂时收起，但问题状态必须保留到真正作答完成。
         self._ask_response_mode = ""
         self._ask_response_choice = ""
+        self._ask_selection_mode = "single"
+        self._ask_min_selections = 1
+        self._ask_max_selections = 1
+        self._ask_selected_indices = []
+        self._ask_option_labels = []
         self.refresh_ready.connect(self._apply_async_refresh)
         self.target_ready.connect(self._apply_target_state)
         self.rename_ready.connect(self._apply_rename_result)
@@ -1932,6 +2207,11 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
         self.lbl_ask_question.setObjectName("askQuestion")
         self.lbl_ask_question.setWordWrap(True)
         ask_body_layout.addWidget(self.lbl_ask_question)
+        self.lbl_ask_select_hint = QLabel("")
+        self.lbl_ask_select_hint.setObjectName("askSelectHint")
+        self.lbl_ask_select_hint.setWordWrap(True)
+        self.lbl_ask_select_hint.hide()
+        ask_body_layout.addWidget(self.lbl_ask_select_hint)
         self.ask_options_grid = QGridLayout()
         self.ask_options_grid.setContentsMargins(0, 0, 0, 0)
         self.ask_options_grid.setSpacing(8)
@@ -2110,6 +2390,9 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
                 background: {c['surface_alt']}; border-radius: 10px;
                 padding: 8px 10px;
             }}
+            QLabel#askSelectHint {{
+                color: {c['sub_deep']}; font-size: 11px; padding: 0 2px;
+            }}
             QLabel#askFrom {{
                 color: {c['sub_deep']}; font-size: 11px;
                 padding: 0 2px 2px;
@@ -2117,10 +2400,15 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
             QFrame#askOption {{
                 background: {c['surface']}; border: 1px solid {c['border']}; border-radius: 16px;
             }}
+            QFrame#askOption[selected="true"] {{
+                background: {c['surface_alt']}; border-color: {c['accent']};
+            }}
+            QFrame#askOption[selected="true"] QLabel#askChoice {{
+                color: {c['accent_deep']}; font-weight: 700;
+            }}
             QLabel#askChoice {{
                 color: {c['ink']}; font-size: 13px; font-weight: 600;
             }}
-            QLabel#askChoice:focus {{ border: 2px solid {c['accent']}; }}
             QLabel#askDescription {{
                 color: {c['sub_deep']}; font-size: 11px; padding: 2px 10px 8px;
             }}
@@ -2250,6 +2538,7 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
             self.ask_input.show()
             self.btn_ask_skip.show()
             self.btn_ask_send.show()
+            self.btn_ask_send.setText("确认选择" if self._ask_selection_mode == "multiple" else "发送")
             screen = self.ball.screen() or QApplication.primaryScreen()
             geo = screen.availableGeometry() if screen else None
             max_height = ASK_PANEL_MAX_HEIGHT
@@ -2276,6 +2565,8 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
             self.ask_input.hide()
             self.btn_ask_skip.hide()
             self.btn_ask_send.hide()
+            self.btn_ask_send.setText("发送")
+            self.lbl_ask_select_hint.hide()
             self._set_ask_controls_enabled(False)
 
     def _settle_ask_height(self):
@@ -2327,8 +2618,20 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
             self.lbl_ask_from.hide()
         self.lbl_ask_question.setText(str(ask.get("question") or ""))
         options = ask.get("options") if isinstance(ask.get("options"), list) else []
+        self._ask_selection_mode = "multiple" if ask.get("selectionMode") == "multiple" else "single"
+        self._ask_selected_indices = []
+        self._ask_option_labels = []
+        if self._ask_selection_mode == "multiple":
+            min_value = ask.get("minSelections")
+            max_value = ask.get("maxSelections")
+            self._ask_min_selections = min_value if isinstance(min_value, int) and min_value > 0 else 1
+            self._ask_max_selections = max_value if isinstance(max_value, int) and max_value > 0 else len(options)
+            self._ask_max_selections = max(self._ask_min_selections, min(self._ask_max_selections, len(options)))
+        else:
+            self._ask_min_selections = 1
+            self._ask_max_selections = 1
         # 选项永远 1 列竖排：每个选项一个整行横条胶囊（跟普通推荐条同款排法）
-        for index, option in enumerate(options):
+        for option in options:
             if not isinstance(option, dict):
                 continue
             original_label = str(option.get("label") or "").strip()
@@ -2336,21 +2639,63 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
                 continue
             recommended = original_label.endswith("(Recommended)")
             display_label = original_label[:-len("(Recommended)")].rstrip() if recommended else original_label
+            option_index = len(self._ask_option_labels)
+            self._ask_option_labels.append(original_label)
             frame = AskOptionFrame(
                 display_label or original_label,
                 str(option.get("description") or "").strip(),
                 recommended,
+                self._ask_selection_mode,
             )
             frame.choice_label.clicked.connect(
-                lambda label=original_label: self._respond_ask("option", label)
+                lambda index=option_index: self._toggle_ask_option(index)
             )
-            self.ask_options_grid.addWidget(frame, index, 0)
+            self.ask_options_grid.addWidget(frame, option_index, 0)
             self._ask_option_frames.append(frame)
         self.ask_input.clear()
+        self.ask_input.setPlaceholderText(
+            "也可以直接填写其他答案…" if self._ask_selection_mode == "multiple"
+            else "在此输入文本（嘻嘻，惯性思维了不是？在哪输入不是输入呢？）"
+        )
         self.lbl_feedback.setText("")
+        self._update_ask_selection_ui()
         self._set_ask_controls_enabled(not self._ask_responding and not self._ask_finished)
         self._sync_size()
         self.keep_current_position(full_height=True)
+
+    def _toggle_ask_option(self, index):
+        if not self._ask_entry or self._ask_responding or self._ask_finished:
+            return
+        if index < 0 or index >= len(self._ask_option_labels):
+            return
+        if self._ask_selection_mode != "multiple":
+            self._respond_ask("option", self._ask_option_labels[index])
+            return
+        if index in self._ask_selected_indices:
+            self._ask_selected_indices.remove(index)
+        elif len(self._ask_selected_indices) >= self._ask_max_selections:
+            self._flash(f"最多选择 {self._ask_max_selections} 项")
+            return
+        else:
+            self._ask_selected_indices.append(index)
+        self._ask_selected_indices.sort()
+        self._update_ask_selection_ui()
+
+    def _update_ask_selection_ui(self):
+        selected = set(self._ask_selected_indices)
+        for index, frame in enumerate(self._ask_option_frames):
+            frame.set_selected(index in selected)
+        if self._ask_selection_mode == "multiple":
+            count = len(self._ask_selected_indices)
+            self.lbl_ask_select_hint.setText(
+                f"可多选 · 至少 {self._ask_min_selections} 项，最多 {self._ask_max_selections} 项 · 已选 {count} 项"
+            )
+            self.lbl_ask_select_hint.show()
+            self.btn_ask_send.setText("确认选择")
+        else:
+            self.lbl_ask_select_hint.clear()
+            self.lbl_ask_select_hint.hide()
+            self.btn_ask_send.setText("发送")
 
     def _set_ask_controls_enabled(self, enabled):
         for frame in self._ask_option_frames:
@@ -2361,10 +2706,17 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
 
     def _send_custom_ask(self):
         value = normalize_custom_answer(self.ask_input.text())
-        if not value:
-            self._flash("请选择一个选项或填写自定义答案")
+        if value:
+            self._respond_ask("custom", value)
             return
-        self._respond_ask("custom", value)
+        if self._ask_selection_mode == "multiple":
+            if len(self._ask_selected_indices) < self._ask_min_selections:
+                self._flash(f"至少选择 {self._ask_min_selections} 项")
+                return
+            choices = [self._ask_option_labels[index] for index in self._ask_selected_indices]
+            self._respond_ask("option", choices)
+            return
+        self._flash("请选择一个选项或填写自定义答案")
 
     def _respond_ask(self, mode, choice):
         if not self._ask_entry or self._ask_responding or self._ask_finished:
@@ -2415,7 +2767,11 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
             self._ask_finished = True
             mode = payload.get("mode") or self._ask_response_mode
             choice = payload.get("choice") or self._ask_response_choice
-            self._flash("已跳过" if mode == "skip" else f"已发送 · {choice}")
+            if isinstance(choice, list):
+                choice_text = "、".join(str(item) for item in choice)
+            else:
+                choice_text = str(choice)
+            self._flash("已跳过" if mode == "skip" else f"已发送 · {choice_text}")
             self._set_ask_controls_enabled(False)
             completed_ask_id = self._ask_entry.get("askId")
             # 作答完成不恢复推荐面板，短暂反馈后直接收起成悬浮球
@@ -2441,6 +2797,11 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
         self._ask_user_hidden = False
         self._ask_response_mode = ""
         self._ask_response_choice = ""
+        self._ask_selection_mode = "single"
+        self._ask_min_selections = 1
+        self._ask_max_selections = 1
+        self._ask_selected_indices = []
+        self._ask_option_labels = []
         self._needs_reanchor = False
         self.ball._ask_emitting = False  # 提问结束，停止散发花瓣
         self._set_ask_mode(False)
@@ -2898,45 +3259,24 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
         self.adjustSize()
 
     def move_to_ball(self):
+        """与推荐面板同一套定位：左侧优先，左侧放不下才翻到右侧。"""
         self._sync_size()
         b = self.ball
         screen = b.screen() or QApplication.primaryScreen()
         geo = screen.availableGeometry()
         bw = b.width()
         bh = b.height()
-        # 球在中间时保持记住的边向，移开后不弹回
-        snap_margin = 26
-        if b.x() + bw > geo.right() - snap_margin:
-            side = "left"      # 球贴右缘 → 面板翻到左边
-        elif b.x() < geo.left() + snap_margin:
-            side = "right"     # 球贴左缘 → 面板翻到右边
-        else:
-            side = self.side   # 中间：保持当前边向
-        if side != self.side:
-            self.side = side
-            b.state["panel_side"] = side
-            save_state(b.state)
-        # 按边向放面板；当前侧放不下（窄屏/球太靠边）自动翻另一侧兜底
-        if side == "left":
-            x = b.x() - self.width() - 8
-            if x < geo.left():
-                side = "right"
-                x = b.x() + bw + 8
-        else:
-            x = b.x() + bw + 8
-            if x + self.width() > geo.right():
-                side = "left"
-                x = b.x() - self.width() - 8
-        if side != self.side:
-            self.side = side
-            b.state["panel_side"] = side
-            save_state(b.state)
-        x = max(geo.left(), min(x, geo.right() - self.width() + 1))
-        y = popup_anchor_y(
-            (b.x(), b.y(), bw, bh), self.height(),
+        x, y, side = position_popup_left_first(
+            (b.x(), b.y(), bw, bh),
+            (self.width(), self.height()),
             (geo.left(), geo.top(), geo.right() + 1, geo.bottom() + 1),
-            PANEL_ANCHOR_RATIO,
+            gap=8,
+            anchor_ratio=PANEL_ANCHOR_RATIO,
         )
+        if side != self.side:
+            self.side = side
+            b.state["panel_side"] = side
+            save_state(b.state)
         self.move(x, y)
 
     def close_menu(self):
@@ -2970,6 +3310,9 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
             self._drag_panel_start = self.pos()
             self._drag_ball_start = self.ball.pos()
             self._drag_moved = False
+            reset_motion = getattr(self.ball, "_reset_drag_motion", None)
+            if callable(reset_motion):
+                reset_motion()
         super().mousePressEvent(e)
 
     def mouseMoveEvent(self, e):
@@ -2991,11 +3334,17 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
             )
             self.move(self._drag_panel_start + QPoint(dx, dy))
             self.ball.move(self._drag_ball_start + QPoint(dx, dy))
+            record_motion = getattr(self.ball, "_record_drag_motion", None)
+            if callable(record_motion):
+                record_motion()
         super().mouseMoveEvent(e)
 
     def mouseReleaseEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
             if self._drag_moved:
+                release_motion = getattr(self.ball, "_release_drag_motion", None)
+                if callable(release_motion):
+                    release_motion()
                 self.ball._save_pos()
             self._drag_press = None
             self._drag_panel_start = None
@@ -3504,6 +3853,7 @@ class ReadPanel(QFrame):
     # ── 打开 / 定位 ──
     def open_for(self, name, start=False):
         self._closed = False
+        self._user_dragged = False
         self._read_seq += 1
         self._fav_seq += 1
         self._target_seq += 1
@@ -3544,48 +3894,25 @@ class ReadPanel(QFrame):
         self.refresh_replies_async(auto_read=bool(start))
 
     def move_to_ball(self):
-        """与推荐面板同一套定位：贴边翻边 + 38% 锚点（花在窗口上部，主体在下方）。"""
+        """与推荐面板同一套定位：左侧优先，左侧放不下才翻到右侧。"""
         self._sync_size()
         b = self.ball
         screen = b.screen() or QApplication.primaryScreen()
         geo = screen.availableGeometry()
         bw = b.width()
         bh = b.height()
-        # 球在中间时保持记住的边向，移开后不弹回
-        snap_margin = 26
-        if b.x() + bw > geo.right() - snap_margin:
-            side = "left"      # 球贴右缘 → 面板翻到左边
-        elif b.x() < geo.left() + snap_margin:
-            side = "right"     # 球贴左缘 → 面板翻到右边
-        else:
-            side = self.side   # 中间：保持当前边向
-        if side != self.side:
-            self.side = side
-            if getattr(b, "state", None) is not None:
-                b.state["panel_side"] = side
-                save_state(b.state)
-        # 按边向放面板；当前侧放不下（窄屏/球太靠边）自动翻另一侧兜底
-        if side == "left":
-            x = b.x() - self.width() - 8
-            if x < geo.left():
-                side = "right"
-                x = b.x() + bw + 8
-        else:
-            x = b.x() + bw + 8
-            if x + self.width() > geo.right():
-                side = "left"
-                x = b.x() - self.width() - 8
-        if side != self.side:
-            self.side = side
-            if getattr(b, "state", None) is not None:
-                b.state["panel_side"] = side
-                save_state(b.state)
-        x = max(geo.left(), min(x, geo.right() - self.width() + 1))
-        y = popup_anchor_y(
-            (b.x(), b.y(), bw, bh), self.height(),
+        x, y, side = position_popup_left_first(
+            (b.x(), b.y(), bw, bh),
+            (self.width(), self.height()),
             (geo.left(), geo.top(), geo.right() + 1, geo.bottom() + 1),
-            PANEL_ANCHOR_RATIO,
+            gap=8,
+            anchor_ratio=PANEL_ANCHOR_RATIO,
         )
+        if side != self.side:
+            self.side = side
+            if getattr(b, "state", None) is not None:
+                b.state["panel_side"] = side
+                save_state(b.state)
         self.move(x, y)
 
     def _keep_position(self):
@@ -3903,6 +4230,9 @@ class ReadPanel(QFrame):
             self._drag_panel_start = self.pos()
             self._drag_ball_start = self.ball.pos()
             self._drag_moved = False
+            reset_motion = getattr(self.ball, "_reset_drag_motion", None)
+            if callable(reset_motion):
+                reset_motion()
         super().mousePressEvent(e)
 
     def mouseMoveEvent(self, e):
@@ -3924,11 +4254,17 @@ class ReadPanel(QFrame):
             )
             self.move(self._drag_panel_start + QPoint(dx, dy))
             self.ball.move(self._drag_ball_start + QPoint(dx, dy))
+            record_motion = getattr(self.ball, "_record_drag_motion", None)
+            if callable(record_motion):
+                record_motion()
         super().mouseMoveEvent(e)
 
     def mouseReleaseEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
             if self._drag_moved:
+                release_motion = getattr(self.ball, "_release_drag_motion", None)
+                if callable(release_motion):
+                    release_motion()
                 try:
                     self.ball._save_pos()
                 except Exception:

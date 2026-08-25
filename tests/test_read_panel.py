@@ -428,6 +428,14 @@ class ReadPanelPositionTests(QtTestCase):
         db = ball.pos() - before_ball
         self.assertGreater(dp.x(), 0)
         self.assertEqual(dp, db)  # 朗读窗与花朵以同一位移一起移动
+        self.assertTrue(ball._drag_motion_active)
+        self.assertGreater(ball._drag_velocity_x, 0.0)
+        release = QMouseEvent(
+            QEvent.Type.MouseButtonRelease, QPointF(60, 55), QPointF(before_panel.x() + 70, before_panel.y() + 55),
+            Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+        )
+        rp.mouseReleaseEvent(release)
+        self.assertFalse(ball._drag_motion_active)
         rp.close()
         ball.close()
         app.processEvents()

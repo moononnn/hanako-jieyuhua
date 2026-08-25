@@ -9,6 +9,24 @@ from _zhujian_test_support import MODULE_PATH, QtTestCase, _APP, zhujian
 
 
 class ZhujianMotionTests(QtTestCase):
+    def test_popup_placement_prefers_left_even_when_previous_side_was_right(self):
+        x, _y, side = zhujian.position_popup_left_first(
+            (500, 300, 80, 80),
+            (344, 440),
+            (0, 0, 800, 800),
+        )
+        self.assertEqual(side, "left")
+        self.assertEqual(x, 148)
+
+    def test_popup_placement_falls_back_right_when_left_has_no_room(self):
+        x, _y, side = zhujian.position_popup_left_first(
+            (100, 300, 80, 80),
+            (344, 440),
+            (0, 0, 800, 800),
+        )
+        self.assertEqual(side, "right")
+        self.assertEqual(x, 188)
+
     def test_ask_poll_uses_latest_question_and_custom_input_has_200_char_limit(self):
         pending = [
             {"askId": "broken", "ts": "not-a-number"},
@@ -27,6 +45,122 @@ class ZhujianMotionTests(QtTestCase):
         self.assertTrue(description.wordWrap())
         frame.close()
         frame.deleteLater()
+        app.processEvents()
+
+    def test_multiple_ask_selects_without_submitting_until_confirm(self):
+        app = zhujian.QApplication.instance() or zhujian.QApplication([])
+        ball = zhujian.ZhujianBall()
+        menu = zhujian.ZhujianMenu(ball)
+        ball.menu = menu
+        ask = {
+            "askId": "ask-multiple",
+            "question": "这轮要做哪些？",
+            "options": [{"label": "核心功能"}, {"label": "界面"}, {"label": "测试"}],
+            "selectionMode": "multiple",
+            "minSelections": 1,
+            "maxSelections": 2,
+            "ts": 1,
+        }
+        menu.show_ask(ask)
+        app.processEvents()
+        self.assertEqual(menu.btn_ask_send.text(), "确认选择")
+        self.assertIn("可多选", menu.lbl_ask_select_hint.text())
+
+        menu._toggle_ask_option(0)
+        self.assertEqual(menu._ask_selected_indices, [0])
+        self.assertTrue(menu._ask_option_frames[0].selected)
+        self.assertIn("☑", menu._ask_option_frames[0].choice_label.text())
+
+        menu._toggle_ask_option(1)
+        self.assertEqual(menu._ask_selected_indices, [0, 1])
+        menu._toggle_ask_option(2)
+        self.assertEqual(menu._ask_selected_indices, [0, 1])
+        self.assertIn("最多选择 2 项", menu.lbl_feedback.text())
+
+        menu._toggle_ask_option(0)
+        self.assertEqual(menu._ask_selected_indices, [1])
+        self.assertFalse(menu._ask_option_frames[0].selected)
+        menu.close()
+        ball.close()
+        app.processEvents()
+
+    def test_multiple_ask_confirm_submits_option_labels_as_list(self):
+        app = zhujian.QApplication.instance() or zhujian.QApplication([])
+        ball = zhujian.ZhujianBall()
+        menu = zhujian.ZhujianMenu(ball)
+        ball.menu = menu
+        ask = {
+            "askId": "ask-multiple-submit",
+            "question": "这轮要做哪些？",
+            "options": [{"label": "核心功能"}, {"label": "界面"}, {"label": "测试"}],
+            "selectionMode": "multiple",
+            "minSelections": 1,
+            "maxSelections": 2,
+            "ts": 1,
+        }
+        calls = []
+        menu._respond_ask = lambda mode, choice: calls.append((mode, choice))
+        menu.show_ask(ask)
+        app.processEvents()
+        menu._toggle_ask_option(0)
+        menu._toggle_ask_option(2)
+        menu._send_custom_ask()
+        self.assertEqual(calls, [("option", ["核心功能", "测试"])])
+        menu.close()
+        ball.close()
+        app.processEvents()
+
+    def test_single_ask_option_click_submits_immediately(self):
+        app = zhujian.QApplication.instance() or zhujian.QApplication([])
+        ball = zhujian.ZhujianBall()
+        menu = zhujian.ZhujianMenu(ball)
+        ball.menu = menu
+        ask = {
+            "askId": "ask-single-submit",
+            "question": "选哪一个？",
+            "options": [{"label": "甲"}, {"label": "乙"}],
+            "selectionMode": "single",
+            "ts": 1,
+        }
+        calls = []
+        menu._respond_ask = lambda mode, choice: calls.append((mode, choice))
+        menu.show_ask(ask)
+        app.processEvents()
+        menu._toggle_ask_option(1)
+        self.assertEqual(calls, [("option", "乙")])
+        menu.close()
+        ball.close()
+        app.processEvents()
+
+    def test_closed_ball_restart_with_cleared_pending_does_not_restore_old_ask(self):
+        app = zhujian.QApplication.instance() or zhujian.QApplication([])
+        first_ball = zhujian.ZhujianBall()
+        first_menu = zhujian.ZhujianMenu(first_ball)
+        first_ball.menu = first_menu
+        ask = {
+            "askId": "ask-restart-cleared",
+            "question": "重启前的旧题",
+            "options": [{"label": "甲"}, {"label": "乙"}],
+            "ts": 1,
+        }
+        first_menu.show_ask(ask)
+        first_menu.close_menu()
+        self.assertTrue(first_menu.is_ask_open())
+        self.assertFalse(first_menu.isVisible())
+        first_menu.close()
+        first_ball.close()
+        app.processEvents()
+
+        # 模拟悬浮球进程重启后，服务端已完成 skip drain，pending 为空。
+        second_ball = zhujian.ZhujianBall()
+        second_menu = zhujian.ZhujianMenu(second_ball)
+        second_ball.menu = second_menu
+        second_ball._apply_ask_payload({"ok": True, "pending": []})
+        app.processEvents()
+        self.assertFalse(second_menu.is_ask_open())
+        self.assertFalse(second_menu.isVisible())
+        second_menu.close()
+        second_ball.close()
         app.processEvents()
 
     def test_ask_transition_does_not_replace_inflight_question(self):
@@ -317,6 +451,82 @@ class ZhujianMotionTests(QtTestCase):
         ball.close()
         app.processEvents()
 
+    def test_drag_velocity_is_smoothed_capped_and_stops_when_window_stops(self):
+        vx, vy, dvx, dvy, speed = zhujian.sample_drag_velocity(
+            100, 100, 1.0, 0.0, 0.0,
+            220, 160, 1.05,
+        )
+        self.assertGreater(vx, 0.0)
+        self.assertGreater(vy, 0.0)
+        self.assertEqual((dvx, dvy), (vx, vy))
+        self.assertLessEqual(speed, zhujian.DRAG_MAX_SPEED)
+        stopped_vx, stopped_vy, *_ = zhujian.sample_drag_velocity(
+            220, 160, 1.05, vx, vy,
+            220, 160, 1.10,
+        )
+        self.assertLess(abs(stopped_vx), abs(vx))
+        self.assertLess(abs(stopped_vy), abs(vy))
+
+    def test_flower_drag_targets_follow_weight_order_and_vertical_lag(self):
+        branch, flower, leaf, vertical = zhujian.flower_drag_targets(1000.0, 700.0)
+        self.assertLess(branch, 0.0)
+        self.assertLess(flower, branch)
+        self.assertLess(leaf, flower)
+        self.assertLess(vertical, 0.0)
+        upward = zhujian.flower_drag_targets(0.0, -700.0)
+        self.assertEqual(upward[:3], (0.0, 0.0, 0.0))
+        self.assertGreater(upward[3], 0.0)
+
+        start = zhujian.flower_drag_impulses(800.0, 500.0)
+        stop = zhujian.flower_drag_impulses(-800.0, -500.0)
+        for start_value, stop_value in zip(start, stop):
+            self.assertAlmostEqual(start_value, -stop_value)
+        self.assertGreater(abs(start[2]), abs(start[1]))
+        self.assertGreater(abs(start[1]), abs(start[0]))
+
+    def test_drag_springs_keep_velocity_when_target_reverses(self):
+        value = velocity = 0.0
+        for _ in range(12):
+            value, velocity = zhujian.advance_motion_spring(
+                value, velocity, -10.0, 40.0, 8.0, 1 / 60, 14.0,
+            )
+        before = value
+        value, velocity = zhujian.advance_motion_spring(
+            value, velocity, 10.0, 40.0, 8.0, 1 / 60, 14.0,
+        )
+        self.assertLess(value, 0.0)
+        self.assertNotEqual(value, 10.0)
+        self.assertNotEqual(value, before)
+
+    def test_real_window_drag_feeds_all_flower_layers_and_cancels_click_release_burst(self):
+        app = zhujian.QApplication.instance() or zhujian.QApplication([])
+        ball = zhujian.ZhujianBall()
+        try:
+            ball._begin_press_effect()
+            press_petals = len(ball.petal_particles)
+            ball._cancel_press_for_drag()
+            self.assertFalse(ball.pressed)
+            self.assertEqual(len(ball.petal_particles), press_petals)
+
+            ball.move(100, 100)
+            ball._reset_drag_motion(now=1.0)
+            ball.move(165, 130)
+            ball._record_drag_motion(now=1.05)
+            self.assertGreater(ball._drag_velocity_x, 0.0)
+            self.assertLess(ball.drag_branch_velocity, 0.0)
+            self.assertLess(ball.drag_flower_velocity, ball.drag_branch_velocity)
+            self.assertLess(ball.drag_leaf_velocity, ball.drag_flower_velocity)
+            self.assertLess(ball.drag_vertical_velocity, 0.0)
+            before_release = ball.drag_branch_velocity
+            ball._release_drag_motion()
+            self.assertFalse(ball._drag_motion_active)
+            self.assertLess(ball.drag_branch_velocity, 0.0)
+            self.assertLess(abs(ball.drag_branch_velocity), abs(before_release))
+        finally:
+            ball.close()
+            ball.deleteLater()
+            app.processEvents()
+
     def test_wind_strength_is_bounded_and_increases_with_speed(self):
         slow = zhujian.wind_strength_from_speed(0)
         medium = zhujian.wind_strength_from_speed(550)
@@ -454,45 +664,60 @@ class ZhujianMotionTests(QtTestCase):
         self.assertEqual(zhujian.FLOWER_SIZE, 34)
         for direction in (-1.0, 1.0):
             for press_amount in (1.08, -0.34):
-                t = 1.2
-                bloom = 1.0
-                gust = zhujian.MAX_WIND_STRENGTH
-                angle = 11.0 * direction
-                lift = -0.45 * math.sin(t * 1.05)
-                rebound = max(0.0, -press_amount)
-                branch_offset, flower_offset, leaf_offset = zhujian.component_motion(
-                    t, bloom, gust, direction, rebound,
-                )
-                branch_angle = angle * 0.42 + branch_offset * 0.55 + press_amount * 4.8
+                for drag_vertical in (-5.0, 5.0):
+                    t = 1.2
+                    bloom = 1.0
+                    gust = zhujian.MAX_WIND_STRENGTH
+                    angle = 11.0 * direction
+                    lift = -0.45 * math.sin(t * 1.05)
+                    rebound = max(0.0, -press_amount)
+                    branch_offset, flower_offset, leaf_offset = zhujian.component_motion(
+                        t, bloom, gust, direction, rebound,
+                    )
+                    ball.drag_branch_angle = 7.5 * direction
+                    ball.drag_flower_angle = 14.0 * direction
+                    ball.drag_leaf_angle = 20.0 * direction
+                    ball.drag_vertical = drag_vertical
+                    branch_angle = (
+                        angle * 0.42
+                        + branch_offset * 0.55
+                        + press_amount * 4.8
+                        + ball.drag_branch_angle
+                    )
 
-                image = QImage(zhujian.BALL_SIZE, zhujian.BALL_SIZE, QImage.Format.Format_ARGB32_Premultiplied)
-                image.fill(0)
-                painter = QPainter(image)
-                painter.translate(zhujian.BRANCH_PIVOT[0], zhujian.BRANCH_PIVOT[1])
-                painter.rotate(branch_angle)
-                painter.translate(-zhujian.BRANCH_PIVOT[0], -zhujian.BRANCH_PIVOT[1])
-                ball._draw_layer(
-                    painter, ball.pix_leaf, zhujian.LEAF_SIZE, leaf_offset,
-                    zhujian.LEAF_CENTER[0], zhujian.LEAF_CENTER[1] + lift * 0.35,
-                )
-                ball._draw_layer(
-                    painter, ball.pix_flower, zhujian.FLOWER_SIZE, flower_offset,
-                    zhujian.FLOWER_CENTER[0], zhujian.FLOWER_CENTER[1] + lift, 1.0,
-                )
-                painter.end()
-                points = [
-                    (x, y)
-                    for y in range(image.height())
-                    for x in range(image.width())
-                    if image.pixelColor(x, y).alpha() > 4
-                ]
-                self.assertTrue(points)
-                xs = [point[0] for point in points]
-                ys = [point[1] for point in points]
-                self.assertGreaterEqual(min(xs), 1)
-                self.assertGreaterEqual(min(ys), 1)
-                self.assertLessEqual(max(xs), zhujian.BALL_SIZE - 2)
-                self.assertLessEqual(max(ys), zhujian.BALL_SIZE - 2)
+                    image = QImage(zhujian.BALL_SIZE, zhujian.BALL_SIZE, QImage.Format.Format_ARGB32_Premultiplied)
+                    image.fill(0)
+                    painter = QPainter(image)
+                    painter.translate(zhujian.BRANCH_PIVOT[0], zhujian.BRANCH_PIVOT[1])
+                    painter.rotate(branch_angle)
+                    painter.translate(-zhujian.BRANCH_PIVOT[0], -zhujian.BRANCH_PIVOT[1])
+                    ball._draw_layer(
+                        painter, ball.pix_leaf, zhujian.LEAF_SIZE,
+                        leaf_offset + ball.drag_leaf_angle,
+                        zhujian.LEAF_CENTER[0],
+                        zhujian.LEAF_CENTER[1] + lift * 0.35 + drag_vertical * 0.45,
+                    )
+                    ball._draw_layer(
+                        painter, ball.pix_flower, zhujian.FLOWER_SIZE,
+                        flower_offset + ball.drag_flower_angle,
+                        zhujian.FLOWER_CENTER[0],
+                        zhujian.FLOWER_CENTER[1] + lift + drag_vertical,
+                        1.0,
+                    )
+                    painter.end()
+                    points = [
+                        (x, y)
+                        for y in range(image.height())
+                        for x in range(image.width())
+                        if image.pixelColor(x, y).alpha() > 4
+                    ]
+                    self.assertTrue(points)
+                    xs = [point[0] for point in points]
+                    ys = [point[1] for point in points]
+                    self.assertGreaterEqual(min(xs), 1)
+                    self.assertGreaterEqual(min(ys), 1)
+                    self.assertLessEqual(max(xs), zhujian.BALL_SIZE - 2)
+                    self.assertLessEqual(max(ys), zhujian.BALL_SIZE - 2)
         ball.close()
         ball.deleteLater()
         app.processEvents()
