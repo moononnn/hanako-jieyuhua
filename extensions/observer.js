@@ -17,6 +17,7 @@ import os from "node:os";
 import { listAskPending, queueAskSkip } from "../lib/data.js";
 import { lastUserMessageTs } from "../lib/session.js";
 import { supportsInteractiveCard } from "../lib/suggestion-card.js";
+import { isZhujianPresentationRunning } from "../lib/zhujian.js";
 
 const HANA_HOME = process.env.HANA_HOME || path.join(os.homedir(), ".hanako");
 const DATA_DIR = path.join(HANA_HOME, "plugin-data", "jiegehua");
@@ -59,6 +60,10 @@ function readHanaAppVersion() {
   } catch {
     return "";
   }
+}
+
+export function shouldInjectAskGuidance(presentation, running) {
+  return presentation === "ball" && running === true;
 }
 
 function cardGuidance() {
@@ -191,19 +196,24 @@ async function handleAskAutoSkip(event) {
 export default function (pi) {
   appendLog("[启动] 解语花注入扩展加载（context 事件模式）");
 
-  pi.on("context", async (event) => {
+  pi.on("context", async (event, ctx) => {
     try {
       // 隐式跳过检测独立于注入：悬浮球模式（presentation=ball）下也生效
       await handleAskAutoSkip(event);
 
       const cfg = readConfig();
       if (cfg.presentation === "ball") {
-        // 悬浮球模式：不注入推荐引导（悬浮球自己管），但注入拍板引导，
-        // 否则其他助手的会话里没有任何提示通道，flash 模型想不起 ask 工具。
+        // 只有原版悬浮球或融合悬浮球实时运行时才注入拍板引导；
+        // 配置仍是 ball 但用户手动关掉进程时，不给主模型增加无效注意力。
         const msgCount = event?.messages?.length || 0;
         if (msgCount === 0) return;
+        const running = await isZhujianPresentationRunning(ctx);
+        if (!shouldInjectAskGuidance(cfg.presentation, running)) {
+          appendLog("[context] 已跳过 ask 引导（悬浮球/融合悬浮球未运行）");
+          return;
+        }
         if (injectAsk(event)) {
-          appendLog(`[context] ✅ 已注入 ask 引导（ball）`);
+          appendLog(`[context] ✅ 已注入 ask 引导（ball，running=${running}）`);
           return { messages: event.messages };
         }
         appendLog("[context] 注入失败（没找到可注入的位置）");

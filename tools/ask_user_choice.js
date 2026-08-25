@@ -8,12 +8,14 @@ import { isZhujianPresentationRunning } from "../lib/zhujian.js";
 
 export const name = "ask_user_choice";
 export const description = [
-  "当你需要用户拍板、选择或提供偏好才能继续时，必须先调用这个工具（用纯文本问选择题不会弹出提问面板）。",
+  "仅当解语花悬浮球或融合悬浮球正在运行，且你需要用户拍板、选择或提供偏好才能继续时，才调用这个工具（用纯文本问选择题不会弹出提问面板）。",
   "樱花悬浮球会直接把推荐回复区替换成提问区，用户作答后你会收到结构化的 Markdown 回传；提问面板已弹出后，不要在正文里重复问一遍。",
   "能自己查到或推断的事实不要问，只问用户自己的选择，或确实查不到的关键歧义。",
   "适合：选方案、确认是否执行、选择风格/时间/目标、补充关键偏好。",
   "不适合：答案唯一、只是陈述、纯闲聊，或没有正在运行的解语花/融合悬浮球。",
   "参数：question 是要用户拍板的问题；options 是 2～6 个选项；header 可选，是面板上的小标题。",
+  "默认单选。只有选项彼此可以同时成立、用户可能要勾选一组时，才把 selectionMode 设为 multiple；互斥方案、确认动作和最终拍板用 single。",
+  "multiple 可用 minSelections/maxSelections 限制选择数量，默认至少 1 项、最多全部选项。",
   "需要推荐某个选项时，把它放在第一项，并在 label 末尾加 (Recommended)。",
 ].join("\n");
 
@@ -41,6 +43,23 @@ export const parameters = {
     header: {
       type: "string",
       description: "可选，面板顶部的小标题，例如「确认」或「选模式」。",
+    },
+    selectionMode: {
+      type: "string",
+      enum: ["single", "multiple"],
+      description: "选择模式：默认 single；只有多个选项可以同时成立时才用 multiple。",
+    },
+    minSelections: {
+      type: "integer",
+      minimum: 1,
+      maximum: 6,
+      description: "仅 multiple 使用，最少选择几项，默认 1。",
+    },
+    maxSelections: {
+      type: "integer",
+      minimum: 1,
+      maximum: 6,
+      description: "仅 multiple 使用，最多选择几项，默认等于选项数量。",
     },
   },
   required: ["question", "options"],
@@ -77,7 +96,10 @@ export async function execute(input, ctx) {
   const question = typeof input?.question === "string" ? input.question.trim() : "";
   const options = Array.isArray(input?.options) ? input.options : [];
   const header = typeof input?.header === "string" ? input.header.trim() : "";
-  const error = validateAskInput({ question, options, header });
+  const selectionMode = input?.selectionMode;
+  const minSelections = input?.minSelections;
+  const maxSelections = input?.maxSelections;
+  const error = validateAskInput({ question, options, header, selectionMode, minSelections, maxSelections });
   if (error) {
     return { content: [{ type: "text", text: `提问参数有问题：${error}` }] };
   }
@@ -94,6 +116,9 @@ export async function execute(input, ctx) {
       question,
       options,
       header,
+      selectionMode,
+      minSelections,
+      maxSelections,
       sessionId,
       sessionPath,
     });

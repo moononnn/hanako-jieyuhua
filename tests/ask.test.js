@@ -11,7 +11,10 @@ import {
   ASK_INPUT_MAX_LENGTH,
   ASK_TTL_MS,
   buildAskAnswerText,
+  normalizeAskEntry,
+  normalizeAskSelection,
   validateAskInput,
+  validateAskResponse,
 } from "../lib/ask.js";
 import {
   createAskPending,
@@ -25,8 +28,13 @@ import {
   listAskSkips,
   clearAskSkips,
 } from "../lib/data.js";
-import { respondToAsk, drainAskSkips } from "../lib/zhujian.js";
-import { execute as executeAsk } from "../tools/ask_user_choice.js";
+import {
+  respondToAsk,
+  drainAskSkips,
+  listAskPendingAfterSkipDrain,
+} from "../lib/zhujian.js";
+import { shouldInjectAskGuidance } from "../extensions/observer.js";
+import { description as askDescription, execute as executeAsk } from "../tools/ask_user_choice.js";
 
 function tmpDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "jiegehua-ask-"));
@@ -79,12 +87,37 @@ test("ask_user_choice 在融合球运行时登记提问，不把融合态误判�
   assert.equal(listAskPending(dir).length, 1);
 });
 
+test("ask 引导只在悬浮球实时运行时启用，工具说明同步写明前提", () => {
+  assert.equal(shouldInjectAskGuidance("ball", true), true);
+  assert.equal(shouldInjectAskGuidance("ball", false), false);
+  assert.equal(shouldInjectAskGuidance("card", true), false);
+  assert.equal(shouldInjectAskGuidance("off", false), false);
+  assert.match(askDescription, /悬浮球或融合悬浮球正在运行/);
+});
+
 test("提问参数校验覆盖空问题、选项数量、重复项和说明长度", () => {
   assert.equal(validateAskInput(questionInput()), null);
   assert.match(validateAskInput(questionInput({ question: "" })), /问题不能为空/);
   assert.match(validateAskInput(questionInput({ options: [{ label: "只有一个" }] })), /2～6/);
   assert.match(validateAskInput(questionInput({ options: [{ label: "重复" }, { label: "重复" }] })), /不能重复/);
   assert.match(validateAskInput(questionInput({ options: [{ label: "a" }, { label: "b", description: "x".repeat(301) }] })), /最多 300/);
+});
+
+test("提问选择模式按语义约束：默认单选，多选可限制数量", () => {
+  assert.deepEqual(normalizeAskSelection({}, 3), {
+    selectionMode: "single",
+    minSelections: 1,
+    maxSelections: 1,
+  });
+  assert.deepEqual(normalizeAskSelection({ selectionMode: "multiple" }, 3), {
+    selectionMode: "multiple",
+    minSelections: 1,
+    maxSelections: 3,
+  });
+  assert.equal(validateAskInput(questionInput({ selectionMode: "multiple", maxSelections: 2 })), null);
+  assert.match(validateAskInput(questionInput({ selectionMode: "multiple", minSelections: 3, maxSelections: 2 })), /不能超过/);
+  assert.match(validateAskInput(questionInput({ selectionMode: "single", maxSelections: 2 })), /单选题/);
+  assert.match(validateAskInput(questionInput({ selectionMode: "bogus" })), /single 或 multiple/);
 });
 
 test("createAskPending 写入完整字段，list 只返回未消费提问", async () => {
@@ -97,6 +130,9 @@ test("createAskPending 写入完整字段，list 只返回未消费提问", asyn
   assert.match(created.askId, /^ask_/);
   assert.equal(created.entry.question, "这次按哪个方向继续？");
   assert.equal(created.entry.options.length, 2);
+  assert.equal(created.entry.selectionMode, "single");
+  assert.equal(created.entry.minSelections, 1);
+  assert.equal(created.entry.maxSelections, 1);
   assert.equal(created.entry.sessionId, "sess_test");
   assert.equal(created.entry.consumed, false);
   assert.equal(listAskPending(dir).length, 1);
@@ -195,6 +231,36 @@ test("提问暂存最多保留 10 条最新记录", async () => {
   assert.ok(data.askPending[ids[11]]);
 });
 
+test("多选答案按选项数组校验并以列表回传", () => {
+  const entry = {
+    question: "这轮要做哪些？",
+    options: [{ label: "核心功能" }, { label: "界面" }, { label: "测试" }],
+    selectionMode: "multiple",
+    minSelections: 1,
+    maxSelections: 2,
+  };
+  assert.deepEqual(validateAskResponse(entry, "option", ["核心功能", "测试"]), {
+    mode: "option",
+    choice: ["核心功能", "测试"],
+  });
+  assert.match(validateAskResponse(entry, "option", ["核心功能", "界面", "测试"]).error, /最多选择 2/);
+  assert.match(validateAskResponse(entry, "option", []).error, /至少选择 1/);
+  assert.match(buildAskAnswerText(entry, ["核心功能", "测试"], "option"), /## 回答\n- 核心功能\n- 测试/);
+});
+
+test("旧提问数据没有选择字段时仍按单选归一化", () => {
+  const entry = normalizeAskEntry({
+    askId: "ask_old",
+    question: "选哪一个？",
+    options: [{ label: "A" }, { label: "B" }],
+    header: "确认",
+    ts: Date.now(),
+  });
+  assert.equal(entry.selectionMode, "single");
+  assert.equal(entry.minSelections, 1);
+  assert.equal(entry.maxSelections, 1);
+});
+
 test("buildAskAnswerText 三种回传都带提问卡片身份和问题", () => {
   const entry = { question: "选哪一个？" };
   assert.match(buildAskAnswerText(entry, "A", "option"), /^# 提问卡片/);
@@ -276,6 +342,40 @@ test("respondToAsk 同一提问并发点击只回传一次", async () => {
   assert.equal(results[1].ok, true);
 });
 
+test("respondToAsk 多选把数组原样交给 Deferred 并落盘", async () => {
+  const dir = tmpDir();
+  const { askId } = await createAskPending(dir, {
+    ...questionInput({
+      question: "这轮要做哪些？",
+      options: [{ label: "核心功能" }, { label: "界面" }, { label: "测试" }],
+      selectionMode: "multiple",
+      minSelections: 1,
+      maxSelections: 2,
+    }),
+    sessionId: "sess_multiple",
+    sessionPath: "C:/agents/hanako/sessions/multiple.jsonl",
+  });
+  const calls = [];
+  const bus = {
+    async request(name, payload) {
+      calls.push({ name, payload });
+      return { ok: true };
+    },
+  };
+  const result = await respondToAsk(dir, bus, {
+    askId,
+    mode: "option",
+    choice: ["核心功能", "测试"],
+  });
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.choice, ["核心功能", "测试"]);
+  assert.match(calls[1].payload.result, /- 核心功能\n- 测试/);
+  assert.deepEqual(getAskPending(dir, askId).answer, {
+    choice: ["核心功能", "测试"],
+    mode: "option",
+  });
+});
+
 test("respondToAsk 先 Deferred 回传，成功后才标记 consumed", async () => {
   const dir = tmpDir();
   const { askId } = await createAskPending(dir, {
@@ -353,4 +453,22 @@ test("drainAskSkips 隐式跳过：静默作废提问，零回传零消息", asy
   assert.deepEqual(getAskPending(dir, askId).answer, { mode: "skip", choice: "" });
   assert.deepEqual(listAskSkips(dir), []);
   assert.deepEqual(listAskPending(dir), []);
+});
+
+test("ask/pending 读取会等待隐式跳过清理，且并发轮询复用同一清理 Promise", async () => {
+  const dir = tmpDir();
+  const { askId } = await createAskPending(dir, {
+    ...questionInput(),
+    sessionId: "sess_restart",
+    sessionPath: "C:/agents/hanako/sessions/restart.jsonl",
+  });
+  await queueAskSkip(dir, askId);
+
+  const firstDrain = drainAskSkips(dir);
+  assert.equal(firstDrain, drainAskSkips(dir));
+  const pending = await listAskPendingAfterSkipDrain(dir);
+
+  assert.deepEqual(pending, []);
+  assert.deepEqual(listAskSkips(dir), []);
+  assert.equal(getAskPending(dir, askId).consumed, true);
 });
