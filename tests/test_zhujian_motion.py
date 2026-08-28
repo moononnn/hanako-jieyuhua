@@ -906,6 +906,36 @@ class ZhujianMotionTests(QtTestCase):
         panel.deleteLater()
         app.processEvents()
 
+    def test_refresh_result_does_not_restore_old_target_after_switch(self):
+        app = zhujian.QApplication.instance() or zhujian.QApplication([])
+        ball = zhujian.ZhujianBall()
+        menu = zhujian.ZhujianMenu(ball)
+        ball.menu = menu
+        ball.target_revision = 1
+        ball.target_mode = "pinned"
+        ball.target_name = "新目标"
+        ball.target_title = "新窗口"
+        ball.pinned_target = {"sessionPath": "new.jsonl", "title": "新窗口"}
+        menu._refresh_seq = 1
+        menu._refreshing = True
+        menu._apply_async_refresh({
+            "source": "refresh",
+            "seq": 1,
+            "target_revision": 0,
+            "target": {"name": "旧目标", "title": "旧窗口"},
+            "mode": "auto",
+            "pinned": None,
+            "target_state_loaded": True,
+            "items": None,
+            "error": None,
+        })
+        self.assertEqual(ball.target_mode, "pinned")
+        self.assertEqual(ball.target_name, "新目标")
+        self.assertEqual(ball.target_title, "新窗口")
+        menu.close()
+        ball.close()
+        app.processEvents()
+
     def test_hover_uses_a_larger_exit_zone_and_short_grace_period(self):
         # 这个点在进入区外、退出区内：未悬停时不进入，已悬停时继续保持。
         self.assertFalse(zhujian.resolve_hover_state(False, -18, 32, 0.0, 0.01)[0])

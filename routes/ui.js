@@ -1,3 +1,4 @@
+// 文件预算豁免：服务端渲染的设置页与推荐页共用一份 HTML/CSS/JS 模板，拆分会增加转义与路由漂移风险。
 // 解语花 — 页面路由（服务端渲染完整 HTML，坑 41：客户端只绑事件不做 DOM 构建）
 // /suggest  — 推荐卡片页（渲染在消息流回复末尾）
 // /settings — 设置页（插件抽屉入口）
@@ -86,6 +87,12 @@ ${hanaCss ? `<link rel="stylesheet" href="${escapeAttr(hanaCss)}">` : ""}
     --dgh-ok: var(--green, #8cc790);
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
+  /* 滚动条统一：细薄荷圆条（2026-08-26，明暗主题通用，与全部插件同一规范） */
+  *::-webkit-scrollbar{width:8px;height:8px}
+  *::-webkit-scrollbar-track{background:transparent}
+  *::-webkit-scrollbar-thumb{background:#c9dfd3;border-radius:99px;border:2px solid var(--dgh-bg)}
+  *::-webkit-scrollbar-thumb:hover{background:var(--dgh-accent)}
+  *{scrollbar-width:thin;scrollbar-color:#c9dfd3 transparent}
   body {
     font-family: "LXGW WenKai", "霞鹜文楷", "Kaiti SC", "STKaiti", serif;
     background: transparent;
@@ -290,6 +297,12 @@ ${hanaCss ? `<link rel="stylesheet" href="${escapeAttr(hanaCss)}">` : ""}
     --dgh-err: #c45a4e;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
+  /* 滚动条统一：细薄荷圆条（2026-08-26，与全部插件同一规范） */
+  *::-webkit-scrollbar{width:8px;height:8px}
+  *::-webkit-scrollbar-track{background:transparent}
+  *::-webkit-scrollbar-thumb{background:#c9dfd3;border-radius:99px;border:2px solid var(--dgh-bg)}
+  *::-webkit-scrollbar-thumb:hover{background:var(--dgh-accent)}
+  *{scrollbar-width:thin;scrollbar-color:#c9dfd3 transparent}
   body {
     font-family: "LXGW WenKai", "霞鹜文楷", "Kaiti SC", "STKaiti", serif;
     background: var(--dgh-bg);

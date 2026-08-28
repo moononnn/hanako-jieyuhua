@@ -183,6 +183,23 @@ def latest_ask_pending(pending):
     return max(valid, key=timestamp)
 
 
+def latest_resume_pending(resume):
+    """只展示最新一条断联待办；旧条目留在服务端等过期/清理。"""
+    if not isinstance(resume, list):
+        return None
+    valid = [item for item in resume if isinstance(item, dict) and item.get("resumeId")]
+    if not valid:
+        return None
+
+    def timestamp(item):
+        try:
+            return int(item.get("ts") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    return max(valid, key=timestamp)
+
+
 def normalize_custom_answer(text):
     return str(text or "").strip()[:ASK_INPUT_MAX_LENGTH]
 
@@ -902,7 +919,7 @@ class TargetMenu(QFrame):
 
         mode_row = QHBoxLayout()
         mode_row.setSpacing(6)
-        self.btn_auto = QPushButton("自动判断")
+        self.btn_auto = QPushButton("跟随最近")
         self.btn_auto.setObjectName("modeChoice")
         self.btn_auto.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_auto.clicked.connect(self._pick_auto)
@@ -974,7 +991,7 @@ class TargetMenu(QFrame):
         self.btn_fixed.style().unpolish(self.btn_fixed)
         self.btn_fixed.style().polish(self.btn_fixed)
         self.lbl_mode_hint.setText(
-            "刷新时自动判断最近活跃的对话" if auto_on
+            "跟随最近活跃的对话" if auto_on
             else "从下面最近活跃的 5 个对话中固定一个"
         )
         self.list_host.setVisible(not auto_on)
@@ -1004,17 +1021,14 @@ class TargetMenu(QFrame):
             self.list_box.addWidget(lbl)
             return
         for s in self.sessions:
-            name = s.get("agentName") or s.get("agentId") or "未命名助手"
             title = (s.get("title") or "未命名对话").strip()
             ts = s.get("lastUserTime") or 0
             when = time.strftime("%H:%M", time.localtime(ts / 1000)) if ts else ""
-            meta = f"{name} · {when}" if when else name
-            visible_label = f"{name} · {title}" if title else name
             btn = QPushButton()
             btn.setObjectName("sessionItem")
-            # 助手名不能只藏在 tooltip 里：选择窗口时先认人，再认对话标题。
-            btn.setText(btn.fontMetrics().elidedText(visible_label, Qt.TextElideMode.ElideRight, 246))
-            btn.setToolTip(f"{name}\n{title}\n{when}" if when else f"{name}\n{title}")
+            # 跨助手混排，不再另起助手分类；列表只呈现对话标题和最近时间。
+            btn.setText(btn.fontMetrics().elidedText(title, Qt.TextElideMode.ElideRight, 246))
+            btn.setToolTip(f"{title}\n{when}" if when else title)
             btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setProperty("active", "true" if (self.ball.pinned_target and self.ball.pinned_target.get("sessionPath") == s.get("sessionPath")) else "false")
@@ -1030,6 +1044,7 @@ class TargetMenu(QFrame):
     def _pick_auto(self):
         self._request_seq += 1
         self.panel.invalidate_target_sync()
+        self.ball.target_revision = getattr(self.ball, "target_revision", 0) + 1
         try:
             result = api_post("/pin", {}, timeout=5)
             if not result.get("ok"):
@@ -1044,7 +1059,7 @@ class TargetMenu(QFrame):
         self.ball.target_name = ""
         self.ball.target_title = ""
         self.panel._update_target()
-        self.panel._flash("已改为自动判断活跃窗口 ✓")
+        self.panel._flash("已改为跟随最近活跃的对话 ✓")
         self.panel._set_target_selector_visible(False)
         on_target_changed = getattr(self.panel, "_on_target_changed", None)
         if callable(on_target_changed):
@@ -1055,6 +1070,7 @@ class TargetMenu(QFrame):
     def _pick(self, s):
         self._request_seq += 1
         self.panel.invalidate_target_sync()
+        self.ball.target_revision = getattr(self.ball, "target_revision", 0) + 1
         try:
             result = api_post("/pin", {
                 "sessionPath": s.get("sessionPath") or "",
@@ -1087,17 +1103,19 @@ class TargetMenu(QFrame):
     def refresh_sessions_async(self):
         self._request_seq += 1
         request_seq = self._request_seq
+        target_revision = getattr(self.ball, "target_revision", 0)
         self.loading_sessions = True
         self.sessions_error = ""
         self._sync_ui()
 
         def worker():
-            payload = {"seq": request_seq, "sessions": [], "mode": self.ball.target_mode, "pinned": self.ball.pinned_target, "error": "读取失败，关闭后重开再试"}
+            payload = {"seq": request_seq, "target_revision": target_revision, "sessions": [], "mode": self.ball.target_mode, "pinned": self.ball.pinned_target, "error": "读取失败，可以重新读取"}
             try:
                 data = api_get("/sessions", timeout=5)
                 if data.get("ok"):
                     payload = {
                         "seq": request_seq,
+                        "target_revision": target_revision,
                         "sessions": data.get("sessions") or [],
                         "mode": "pinned" if data.get("mode") == "pinned" else "auto",
                         "pinned": data.get("pinned"),
@@ -1118,13 +1136,15 @@ class TargetMenu(QFrame):
         self.loading_sessions = False
         self.sessions_error = payload.get("error") or ""
         self.sessions = (payload.get("sessions") or [])[:TARGET_SESSION_LIMIT]
-        self.ball.target_mode = payload.get("mode") or "auto"
-        self.ball.pinned_target = payload.get("pinned")
-        if self.ball.target_mode == "pinned" and self.ball.pinned_target:
-            pinned = self.ball.pinned_target
-            self.ball.target_name = pinned.get("agentName") or pinned.get("name") or pinned.get("agentId") or self.ball.target_name
-            self.ball.target_title = pinned.get("title") or self.ball.target_title
-        self.view_mode = "pinned" if self.ball.target_mode == "pinned" else "auto"
+        target_state_current = payload.get("target_revision", getattr(self.ball, "target_revision", 0)) == getattr(self.ball, "target_revision", 0)
+        if target_state_current:
+            self.ball.target_mode = payload.get("mode") or "auto"
+            self.ball.pinned_target = payload.get("pinned")
+            if self.ball.target_mode == "pinned" and self.ball.pinned_target:
+                pinned = self.ball.pinned_target
+                self.ball.target_name = pinned.get("agentName") or pinned.get("name") or pinned.get("agentId") or self.ball.target_name
+                self.ball.target_title = pinned.get("title") or self.ball.target_title
+            self.view_mode = "pinned" if self.ball.target_mode == "pinned" else "auto"
         self.apply_theme()
         self.panel._update_target()
         self.panel._resize_after_target_change()
@@ -1177,6 +1197,7 @@ class ZhujianBall(QWidget):
         self.target_name = ""
         self.target_title = ""
         self.target_mode = "auto"    # auto=跟随最近 / pinned=固定指定会话
+        self.target_revision = 0      # 跨主面板/朗读窗共享，丢弃旧目标状态回包
         self.pinned_target = None    # {sessionPath, agentId, title} 或 None
         self.theme_mode = read_hana_theme_mode()
         self.context_menu = None
@@ -1288,11 +1309,17 @@ class ZhujianBall(QWidget):
         self._ask_poll_inflight = True
 
         def worker():
-            payload = {"ok": False, "pending": []}
+            payload = {"ok": False, "pending": [], "resume": [], "resumeAuto": False, "resumeNotices": []}
             try:
                 data = api_get("/ask/pending", timeout=4)
                 if data.get("ok"):
-                    payload = {"ok": True, "pending": data.get("pending") or []}
+                    payload = {
+                        "ok": True,
+                        "pending": data.get("pending") or [],
+                        "resume": data.get("resume") or [],
+                        "resumeAuto": bool(data.get("resumeAuto")),
+                        "resumeNotices": data.get("resumeNotices") or [],
+                    }
             except Exception:
                 pass
             if self._closed:
@@ -1308,6 +1335,10 @@ class ZhujianBall(QWidget):
         self._ask_poll_inflight = False
         if not payload.get("ok"):
             return
+        # 自动续接成功的短暂提示（面板可见时显示）
+        notices = payload.get("resumeNotices") or []
+        if notices and self.menu is not None and self.menu.isVisible():
+            self.menu.show_resume_notice(notices[-1])
         ask = latest_ask_pending(payload.get("pending"))
         if ask is not None:
             if self.menu is None:
@@ -1334,12 +1365,52 @@ class ZhujianBall(QWidget):
                 self.menu.raise_()
                 self.menu.activateWindow()
             self.menu.show_ask(ask)
+            # 提问态需要持续留在前台供用户作答；只有断联卡按一次性提醒处理。
             self.menu.raise_()
             self._set_fusion_panel_state("ask")
+            return
+        # 没有提问时，断联待办照常弹卡片
+        resume = latest_resume_pending(payload.get("resume"))
+        if resume is not None:
+            if self.menu is None:
+                self.menu = ZhujianMenu(self)
+            # 用户主动收起断联卡时不打回（同 ask 的语义）
+            if (
+                self.menu.is_resume_open()
+                and self.menu._resume_user_hidden
+                and resume.get("resumeId") == self.menu._resume_entry.get("resumeId")
+            ):
+                return
+            # 只在新卡第一次送达时提到当前程序上方；同一张卡后续轮询不再反复 raise，
+            # 否则用户切到 QQ 后，轮询会把这张卡一次次顶回 QQ 上面。
+            resume_already_visible = (
+                self.menu.isVisible()
+                and self.menu.is_resume_open()
+                and resume.get("resumeId") == self.menu._resume_entry.get("resumeId")
+            )
+            if not self.menu.isVisible():
+                # 互斥：自动弹卡片前也先收右键浮签与朗读窗口，保证不并存
+                if self.context_menu is not None:
+                    self.context_menu.close()
+                if self.read_panel is not None and self.read_panel.isVisible():
+                    self.read_panel.close()
+                if not self.menu.is_ask_open() and not self.menu.is_resume_open():
+                    self.menu.prepare_for_show()
+                self.menu.move_to_ball()
+                self.menu.show()
+                self.menu.raise_()
+                self.menu.activateWindow()
+            self.menu.set_resume_auto_state(bool(payload.get("resumeAuto")))
+            self.menu.show_resume(resume)
+            if not resume_already_visible:
+                self.menu.raise_()
             return
         if self.menu is not None and self.menu.is_ask_open():
             # ask 消失（作答完成/隐式跳过/过期）后不弹推荐，直接收起面板回悬浮球
             self.menu.finish_ask_and_collapse()
+        elif self.menu is not None and self.menu.is_resume_open():
+            # 断联卡消失（已继续/用户自己接手/过期）后收起
+            self.menu.finish_resume_and_collapse()
 
     def _sync_theme(self):
         mode = read_hana_theme_mode()
@@ -2100,6 +2171,8 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
     rename_ready = pyqtSignal(object)
     undo_ready = pyqtSignal(object)
     ask_response_ready = pyqtSignal(object)
+    resume_continue_ready = pyqtSignal(object)
+    resume_auto_ready = pyqtSignal(object)
 
     def __init__(self, ball):
         super().__init__(None)
@@ -2141,6 +2214,16 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
         self._ask_max_selections = 1
         self._ask_selected_indices = []
         self._ask_option_labels = []
+        # 断联续接（resume）状态：窗口异常停止时的小卡片
+        self._closed = False  # 菜单不销毁但 worker 守卫会引用 _closed（Ball/ReadPanel 都有，菜单漏了——2026-08-27 实机踩到：缺失导致 worker 抛 AttributeError，emit 永不执行，按钮永远「发送中」）
+        self._resume_entry = None
+        self._resume_responding = False
+        self._resume_finished = False
+        self._resume_user_hidden = False  # 用户主动收起 resume；轮询不自动打回脸上
+        self._resume_auto = False
+        self._resume_notice_timer = None
+        self.resume_continue_ready.connect(self._apply_resume_continue_result)
+        self.resume_auto_ready.connect(self._apply_resume_auto_result)
         self.refresh_ready.connect(self._apply_async_refresh)
         self.target_ready.connect(self._apply_target_state)
         self.rename_ready.connect(self._apply_rename_result)
@@ -2165,7 +2248,7 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
         target_row.setSpacing(6)
         self.lbl_target_label = QLabel("当前对话")
         self.lbl_target_label.setObjectName("targetLabel")
-        self.btn_target = QPushButton("自动判断 ▾")
+        self.btn_target = QPushButton("跟随最近 ▾")
         self.btn_target.setObjectName("target")
         self.btn_target.setToolTip("选择推荐、朗读和标题操作要作用于哪段对话")
         self.btn_target.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -2175,7 +2258,7 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
         head_row.addLayout(target_row)
         root.addLayout(head_row)
 
-        # 当前读取的是哪个对话框（自动判断结果或手动固定的会话），重命名/推荐都基于它
+        # 当前读取的是哪个对话框（跟随最近结果或手动固定的会话），重命名/推荐都基于它
         self.lbl_target_info = QLabel("")
         self.lbl_target_info.setObjectName("targetInfo")
         root.addWidget(self.lbl_target_info)
@@ -2275,6 +2358,47 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
         ask_actions.addWidget(self.btn_ask_skip)
         ask_actions.addWidget(self.btn_ask_send)
         root.addLayout(ask_actions)
+
+        # 断联续接：窗口异常停止时的小卡片（一键继续 / 自动续接开关）
+        self.resume_body = QFrame()
+        self.resume_body.setObjectName("resumeCard")
+        resume_layout = QVBoxLayout(self.resume_body)
+        resume_layout.setContentsMargins(12, 10, 12, 10)
+        resume_layout.setSpacing(6)
+        self.lbl_resume_from = QLabel("")
+        self.lbl_resume_from.setObjectName("resumeFrom")
+        self.lbl_resume_from.setWordWrap(True)
+        resume_layout.addWidget(self.lbl_resume_from)
+        self.lbl_resume_reason = QLabel("")
+        self.lbl_resume_reason.setObjectName("resumeReason")
+        self.lbl_resume_reason.setWordWrap(True)
+        resume_layout.addWidget(self.lbl_resume_reason)
+        resume_actions = QHBoxLayout()
+        resume_actions.setContentsMargins(0, 0, 0, 0)
+        resume_actions.setSpacing(8)
+        self.btn_resume_continue = QPushButton("继续")
+        self.btn_resume_continue.setObjectName("resumeContinue")
+        self.btn_resume_continue.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_resume_continue.setToolTip("往这个窗口发一条「继续」，接上话头")
+        self.btn_resume_continue.clicked.connect(self._continue_resume)
+        resume_actions.addWidget(self.btn_resume_continue)
+        self.btn_resume_auto = QPushButton("自动续接：关")
+        self.btn_resume_auto.setObjectName("resumeAuto")
+        self.btn_resume_auto.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_resume_auto.setCheckable(True)
+        self.btn_resume_auto.setToolTip("打开后检测到窗口断联会自动发「继续」，不再弹窗")
+        self.btn_resume_auto.clicked.connect(self._toggle_resume_auto)
+        resume_actions.addWidget(self.btn_resume_auto, 0, Qt.AlignmentFlag.AlignRight)
+        resume_layout.addLayout(resume_actions)
+        self.resume_body.hide()
+        root.addWidget(self.resume_body)
+
+        # 自动续接成功的短暂提示条（轮询带回，面板开着时显示几秒）
+        self.lbl_resume_notice = QLabel("")
+        self.lbl_resume_notice.setObjectName("resumeNotice")
+        self.lbl_resume_notice.setWordWrap(True)
+        self.lbl_resume_notice.hide()
+        root.addWidget(self.lbl_resume_notice)
 
         self.lbl_section = QLabel("对话工具")
         self.lbl_section.setObjectName("sectionTitle")
@@ -2382,9 +2506,11 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
                 width: 8px; background: transparent; margin: 3px 0;
             }}
             QScrollBar::handle:vertical {{
-                min-height: 26px; background: {c['border']}; border-radius: 4px;
+                min-height: 26px; background: #c9dfd3; border-radius: 4px;
             }}
+            QScrollBar::handle:vertical:hover {{ background: {c['accent']}; }}
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
             QLabel#askQuestion {{
                 color: {c['accent_deep']}; font-size: 14px; font-weight: 700;
                 background: {c['surface_alt']}; border-radius: 10px;
@@ -2434,6 +2560,32 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
             QPushButton#askSkip:disabled, QPushButton#askSend:disabled {{
                 color: {c['sub']}; background: {c['surface_alt']}; border-color: {c['border']};
             }}
+            QFrame#resumeCard {{
+                background: {c['surface_alt']}; border: 1px solid {c['border']}; border-radius: 12px;
+            }}
+            QLabel#resumeFrom {{
+                color: {c['accent_deep']}; font-size: 13px; font-weight: 700;
+            }}
+            QLabel#resumeReason {{ color: {c['sub_deep']}; font-size: 11px; }}
+            QPushButton#resumeContinue {{
+                min-height: 28px; color: {c['accent_text']}; background: {c['accent']};
+                border: 1px solid {c['accent']}; border-radius: 10px;
+                font-size: 11px; font-weight: 600; padding: 0 14px;
+            }}
+            QPushButton#resumeContinue:hover {{ background: {c['accent_deep']}; border-color: {c['accent_deep']}; }}
+            QPushButton#resumeContinue:disabled {{
+                color: {c['sub']}; background: {c['surface_alt']}; border-color: {c['border']};
+            }}
+            QPushButton#resumeAuto {{
+                min-height: 28px; color: {c['accent_deep']}; background: {c['surface']};
+                border: 1px solid {c['border']}; border-radius: 10px;
+                font-size: 11px; font-weight: 600; padding: 0 12px;
+            }}
+            QPushButton#resumeAuto:checked {{
+                color: {c['accent_text']}; background: {c['accent']}; border-color: {c['accent']};
+            }}
+            QPushButton#resumeAuto:hover {{ border-color: {c['accent']}; }}
+            QLabel#resumeNotice {{ color: {c['pink']}; font-size: 11px; font-weight: 600; padding: 2px 2px 0; }}
             QPushButton#refreshBtn, QPushButton#renameBtn, QPushButton#sayBtn {{
                 min-height: 28px; min-width: 88px; color: {c['accent_text']}; background: {c['accent']};
                 border: 1px solid {c['accent']}; border-radius: 10px;
@@ -2466,6 +2618,8 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
             self.target_menu.apply_theme()
 
     def prepare_for_show(self):
+        # 普通面板/提问态恢复为原来的互动层；断联卡会在 show_resume 中临时降级。
+        self._set_window_stays_on_top(True)
         self._needs_reanchor = True
         self._user_dragged = False
         self._flash("")
@@ -2482,14 +2636,31 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
     def is_ask_open(self):
         return self._ask_entry is not None and not self._ask_finished
 
+    def _set_window_stays_on_top(self, enabled):
+        """只让断联卡成为一次性的前台提醒，切换程序后按普通工具窗自然让位。"""
+        flag = Qt.WindowType.WindowStaysOnTopHint
+        enabled = bool(enabled)
+        current = bool(self.windowFlags() & flag)
+        if current == enabled:
+            return
+        was_visible = self.isVisible()
+        position = self.pos()
+        self.setWindowFlag(flag, enabled)
+        if was_visible:
+            # Qt 改顶层 flag 时会暂时隐藏窗口，保住用户已经拖好的位置并恢复显示。
+            self.move(position)
+            self.show()
+
     def _fade_allowed(self):
-        # 提问态保持实体：读题/作答是强互动，不参与鼠标离开淡出
-        return not self.is_ask_open()
+        # 提问态/断联卡保持实体：读题/作答/一键继续是强互动，不参与鼠标离开淡出
+        return not self.is_ask_open() and not self.is_resume_open()
 
     def show_ask(self, ask):
         ask_id = ask.get("askId") if isinstance(ask, dict) else ""
         if not ask_id or self._ask_responding or self._ask_finished:
             return
+        # 断联卡让位给提问后，提问重新回到原来的互动层。
+        self._set_window_stays_on_top(True)
         if self._ask_entry:
             if ask_id == self._ask_entry.get("askId"):
                 # 当前题正在显示或等待失败重试时，不用新题覆盖输入状态；下一轮再处理。
@@ -2497,6 +2668,9 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
             # 新提问（askId 不同）：用最新题替换当前题，仍保持 ask 模式
             #（旧提问由服务端 TTL / 隐式跳过兜底，不丢）
             self._ask_entry = None
+        # 提问优先：断联卡让位（下一轮轮询 resume 仍会回来，不丢）
+        if self._resume_entry is not None:
+            self._resume_entry = None
         self._ask_entry = dict(ask)
         self._ask_user_hidden = False
         # 提问态保持实体：若此前已淡出/正在淡出，立即拉回全不透明并取消排期
@@ -2809,7 +2983,205 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
         self.close_menu()
         self.ball._set_fusion_panel_state("none")
 
+    # ── 断联续接模式：一键继续 / 自动续接开关 ──
+    def is_resume_open(self):
+        return self._resume_entry is not None and not self._resume_finished
+
+    def show_resume(self, resume):
+        resume_id = resume.get("resumeId") if isinstance(resume, dict) else ""
+        if not resume_id or self._resume_responding or self._resume_finished:
+            return
+        if self.is_ask_open():
+            return  # 提问优先：等 ask 完成后下一轮轮询再弹，不打断作答
+        # 断联卡不是永久置顶窗：首次 show/raise 后，用户切换其他程序即可自然盖住它。
+        self._set_window_stays_on_top(False)
+        if self._resume_entry:
+            if resume_id == self._resume_entry.get("resumeId"):
+                return
+            self._resume_entry = None
+        self._resume_entry = dict(resume)
+        self._resume_user_hidden = False
+        self.setWindowOpacity(1.0)
+        self._cancel_fade()
+        self._resume_finished = False
+        self._resume_responding = False
+        self._needs_reanchor = not self._user_dragged
+        self._set_resume_mode(True)
+        self._render_resume(self._resume_entry)
+        self._resume_pulse_title()
+
+    def _resume_pulse_title(self, rounds=3):
+        """断联卡弹出时标题颜色脉冲（accent_deep ↔ pink），提醒内容是断联。"""
+        c = THEME_COLORS[self.ball.theme_mode]
+        step_ms = 170
+        for i in range(rounds * 2):
+            on = i % 2 == 0
+            QTimer.singleShot(
+                i * step_ms,
+                lambda on=on: self.lbl_head.setStyleSheet(f"color: {c['pink']};" if on else ""),
+            )
+
+    def set_resume_auto_state(self, enabled):
+        self._resume_auto = bool(enabled)
+        self.btn_resume_auto.setChecked(self._resume_auto)
+        self.btn_resume_auto.setText("自动续接：开" if self._resume_auto else "自动续接：关")
+
+    def _set_resume_mode(self, active):
+        if active:
+            self.lbl_head.setText("🌸 窗口断联了")
+            self.setMinimumHeight(0)
+            for widget in (
+                self.lbl_target_label, self.btn_target, self.lbl_target_info,
+                self.recommend_body,
+                self.lbl_section, self.say_tool, self.rename_tool, self.lbl_hint,
+            ):
+                widget.hide()
+            self.target_menu.hide()
+            self.ask_scroll.hide()
+            self.ask_input.hide()
+            self.btn_ask_skip.hide()
+            self.btn_ask_send.hide()
+            self.resume_body.show()
+            self.setMaximumHeight(400)
+        else:
+            self.setMaximumHeight(16777215)
+            self.setMinimumHeight(0)
+            self.lbl_head.setText("解语花")
+            for widget in (
+                self.lbl_target_label, self.btn_target, self.lbl_target_info,
+                self.recommend_body,
+                self.lbl_section, self.say_tool, self.rename_tool, self.lbl_hint,
+            ):
+                widget.show()
+            self.resume_body.hide()
+            self._resume_entry = None
+
+    def _render_resume(self, resume):
+        title = str(resume.get("sessionTitle") or "").strip()
+        agent = str(resume.get("agentName") or "").strip()
+        if title:
+            who = f"{title}（{agent}）" if agent else title
+            self.lbl_resume_from.setText(f"💬 来自窗口：{who}")
+        elif agent:
+            self.lbl_resume_from.setText(f"💬 来自：{agent}")
+        else:
+            self.lbl_resume_from.setText("💬 来自某个窗口")
+        self.lbl_resume_reason.setText(str(resume.get("reason") or "窗口断联了"))
+        self.btn_resume_continue.setEnabled(True)
+        self.btn_resume_continue.setText("继续")
+
+    def _continue_resume(self):
+        if not self.is_resume_open() or self._resume_responding:
+            return
+        self._resume_responding = True
+        self.btn_resume_continue.setEnabled(False)
+        self.btn_resume_continue.setText("发送中…")
+        resume_id = self._resume_entry.get("resumeId") or ""
+
+        def worker():
+            result = {"ok": False, "error": "连不上解语花，看看插件开着没"}
+            try:
+                data = api_post("/resume/continue", {"resumeId": resume_id}, timeout=20)
+                if data and data.get("ok"):
+                    result = {"ok": True}
+                else:
+                    result = {"ok": False, "error": (data or {}).get("error") or "发送失败"}
+            except urllib.error.HTTPError as e:
+                # 后端业务错误（待办已失效/会话已删等）带了真实原因，解析出来上屏
+                try:
+                    body = json.loads(e.read().decode("utf-8", "replace"))
+                    result = {"ok": False, "error": body.get("error") or f"发送失败了 ({e.code})"}
+                except Exception:
+                    result = {"ok": False, "error": f"发送失败了 ({e.code})"}
+            except Exception:
+                pass
+            if self._closed:
+                return
+            try:
+                self.resume_continue_ready.emit(result)
+            except RuntimeError:
+                pass
+
+        threading.Thread(target=worker, daemon=True, name="zhujian-resume-continue").start()
+
+    def _apply_resume_continue_result(self, payload):
+        if not self.is_resume_open():
+            return
+        self._resume_responding = False
+        if not payload.get("ok"):
+            self.btn_resume_continue.setEnabled(True)
+            self.btn_resume_continue.setText("继续")
+            self.lbl_resume_reason.setText(f"发送失败：{payload.get('error') or '再试一次'}")
+            return
+        self._flash("已发送 · 继续")
+        self._resume_finished = True
+        # 已让窗口继续：短暂反馈后收起回悬浮球（下一轮轮询也收不到这条了）
+        QTimer.singleShot(650, self.finish_resume_and_collapse)
+
+    def _toggle_resume_auto(self, checked):
+        # 视觉先行：点了立刻显示目标状态，失败再回滚
+        self._resume_auto = bool(checked)
+        self.set_resume_auto_state(self._resume_auto)
+
+        def worker():
+            result = {"ok": False}
+            try:
+                data = api_post("/resume/auto", {"enabled": self._resume_auto}, timeout=6)
+                if data and data.get("ok"):
+                    result = {"ok": True, "enabled": self._resume_auto}
+            except Exception:
+                pass
+            if self._closed:
+                return
+            try:
+                self.resume_auto_ready.emit(result)
+            except RuntimeError:
+                pass
+
+        threading.Thread(target=worker, daemon=True, name="zhujian-resume-auto").start()
+
+    def _apply_resume_auto_result(self, payload):
+        if payload.get("ok"):
+            return
+        # 保存失败：回滚开关状态
+        self._resume_auto = not self._resume_auto
+        self.set_resume_auto_state(self._resume_auto)
+        self._flash("自动续接设置没保存上，再试一次")
+
+    def show_resume_notice(self, notice):
+        """自动续接成功后的短暂提示（轮询带回，面板可见时显示几秒）。"""
+        if not isinstance(notice, dict) or getattr(self, "_closed", False):
+            return
+        title = str(notice.get("title") or "").strip()
+        agent = str(notice.get("agentName") or "").strip()
+        who = title or agent or "某个窗口"
+        self.lbl_resume_notice.setText(f"✿ 已自动让「{who}」继续")
+        self.lbl_resume_notice.show()
+        if self._resume_notice_timer is not None:
+            self._resume_notice_timer.stop()
+        self._resume_notice_timer = QTimer(self)
+        self._resume_notice_timer.setSingleShot(True)
+        self._resume_notice_timer.timeout.connect(self.lbl_resume_notice.hide)
+        self._resume_notice_timer.start(4000)
+
+    def finish_resume_and_collapse(self):
+        """断联卡处理完（已继续 / 待办消失 / 用户接手 / 过期）后：清理状态并收起面板回悬浮球。"""
+        if not self._resume_entry or self._resume_responding:
+            return
+        self._resume_entry = None
+        self._resume_finished = False
+        self._resume_user_hidden = False
+        self._needs_reanchor = False
+        self._set_resume_mode(False)
+        self._flash("")
+        self.close_menu()
+        # 断联卡收起后，下一次打开普通推荐/提问面板仍使用原来的互动层。
+        self._set_window_stays_on_top(True)
+        self.ball._set_fusion_panel_state("none")
+
     def load_cache_async(self):
+        target_revision = getattr(self.ball, "target_revision", 0)
+
         def worker():
             try:
                 data = api_get("/cache", timeout=4)
@@ -2820,6 +3192,7 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
                         "rid": data["cached"].get("rid") or "",
                         "ts": data["cached"].get("ts") or 0,
                         "target": data["cached"].get("target"),
+                        "target_revision": target_revision,
                         "fromCache": True,
                     })
             except Exception:
@@ -2833,10 +3206,11 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
         self._refreshing = True
         self._refresh_seq += 1
         refresh_seq = self._refresh_seq
+        target_revision = getattr(self.ball, "target_revision", 0)
         self._set_refreshing_ui(True)
 
         def worker():
-            payload = {"source": "refresh", "seq": refresh_seq, "items": None, "rid": None, "target": None, "error": None, "target_state_loaded": False}
+            payload = {"source": "refresh", "seq": refresh_seq, "target_revision": target_revision, "items": None, "rid": None, "target": None, "error": None, "target_state_loaded": False}
             try:
                 data = api_get("/target", timeout=4)
                 if data.get("ok"):
@@ -2893,10 +3267,11 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
         if payload.get("source") == "refresh":
             self._refreshing = False
             self._set_refreshing_ui(False)
-        if payload.get("target"):
+        target_state_current = payload.get("target_revision", getattr(self.ball, "target_revision", 0)) == getattr(self.ball, "target_revision", 0)
+        if payload.get("target") and target_state_current:
             self.ball.target_name = payload["target"].get("name") or payload["target"].get("agentId") or ""
             self.ball.target_title = payload["target"].get("title") or self.ball.target_title
-        if payload.get("target_state_loaded"):
+        if payload.get("target_state_loaded") and target_state_current:
             self.ball.target_mode = "pinned" if payload.get("mode") == "pinned" else "auto"
             self.ball.pinned_target = payload.get("pinned")
         self._update_target()
@@ -2928,7 +3303,8 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
 
     def _set_refreshing_ui(self, refreshing):
         self.btn_refresh.setEnabled(not refreshing)
-        self.btn_target.setEnabled(not refreshing)
+        # 刷新推荐期间仍允许切换目标；回包带 target_revision，旧目标状态只会被丢弃。
+        self.btn_target.setEnabled(True)
         self.btn_refresh.setText("正在获取推荐回复…" if refreshing else "刷新推荐")
 
     def rename_async(self):
@@ -3116,38 +3492,39 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
             title = (self.ball.target_title or self.ball.pinned_target.get("title") or "").strip()
             label = f"固定 · {title[:6]}" if title else "固定"
         else:
-            label = "自动判断"
+            label = "跟随最近"
         self.btn_target.setText(f"{label} {arrow}")
         self._update_target_info()
 
     def _update_target_info(self):
-        """头部下方显示当前读取的是哪个对话框：固定会话或自动判断结果。"""
+        """头部下方显示当前读取的是哪个对话框：固定会话或跟随最近结果。"""
         name = (self.ball.target_name or "").strip()
         if self.ball.target_mode == "pinned" and self.ball.pinned_target:
             title = (self.ball.target_title or self.ball.pinned_target.get("title") or "").strip()
             prefix = "固定"
         else:
             title = (self.ball.target_title or "").strip()
-            prefix = "自动"
+            prefix = "跟随最近"
         if title:
             text = " · ".join([prefix, name, title]) if name else " · ".join([prefix, title])
         elif name:
             text = " · ".join([prefix, name]) + "（无标题）"
         else:
-            text = "自动 · 正在定位对话…"
+            text = "跟随最近 · 正在定位对话…"
         self.lbl_target_info.setText(text)
         self._update_say_btn()
 
     def _sync_target_state(self):
         self._target_seq += 1
         target_seq = self._target_seq
+        target_revision = getattr(self.ball, "target_revision", 0)
 
         def worker():
             payload = None
             try:
                 data = api_get("/target", timeout=4)
                 if data.get("ok"):
-                    payload = {**data, "seq": target_seq}
+                    payload = {**data, "seq": target_seq, "target_revision": target_revision}
             except Exception:
                 pass
             if payload is not None:
@@ -3160,6 +3537,8 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
 
     def _apply_target_state(self, data):
         if data.get("seq") != self._target_seq:
+            return
+        if data.get("target_revision", getattr(self.ball, "target_revision", 0)) != getattr(self.ball, "target_revision", 0):
             return
         t = data.get("target") or {}
         self.ball.target_name = t.get("name") or t.get("agentId") or ""
@@ -3282,9 +3661,26 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
     def close_menu(self):
         if self.is_ask_open():
             self._ask_user_hidden = True
+        if self.is_resume_open():
+            # 断联卡收起 = 放弃这条待办（跟 ask 折叠一致）：本地不再打回，服务端标已消费，
+            # 否则每次开球/重启都会再弹（2026-08-27 实机踩到）。
+            self._resume_user_hidden = True
+            self._dismiss_resume_async(self._resume_entry.get("resumeId") or "")
         if self.target_menu is not None:
             self.target_menu.hide()
         self.hide()
+
+    def _dismiss_resume_async(self, resume_id):
+        if not resume_id:
+            return
+
+        def worker():
+            try:
+                api_post("/resume/dismiss", {"resumeId": resume_id}, timeout=6)
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, daemon=True, name="zhujian-resume-dismiss").start()
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -3460,15 +3856,15 @@ class ReadPanel(QFrame):
         head.addWidget(self.btn_close)
         root.addLayout(head)
 
-        # 朗读目标窗口：与推荐面板共用自动判断/手动固定逻辑
+        # 朗读目标窗口：与推荐面板共用跟随最近/手动固定逻辑
         target_row = QHBoxLayout()
         target_row.setSpacing(6)
         self.lbl_target_label = QLabel("选择对话")
         self.lbl_target_label.setObjectName("readTargetLabel")
-        self.btn_target = QPushButton("自动判断 ▾")
+        self.btn_target = QPushButton("跟随最近 ▾")
         self.btn_target.setObjectName("readTargetBtn")
         self.btn_target.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_target.setToolTip("自动跟着最近对话，或固定一段窗口")
+        self.btn_target.setToolTip("跟随最近活跃的对话，或固定一段窗口")
         self.btn_target.clicked.connect(self._open_target_menu)
         target_row.addWidget(self.lbl_target_label)
         target_row.addWidget(self.btn_target)
@@ -3663,7 +4059,7 @@ class ReadPanel(QFrame):
             title = (self.ball.target_title or self.ball.pinned_target.get("title") or "").strip()
             label = f"固定 · {title[:6]}" if title else "固定"
         else:
-            label = "自动判断"
+            label = "跟随最近"
         self.btn_target.setText(label + " " + arrow)
         self._update_target_info()
 
@@ -3674,13 +4070,13 @@ class ReadPanel(QFrame):
             prefix = "固定"
         else:
             title = (self.ball.target_title or "").strip()
-            prefix = "自动"
+            prefix = "跟随最近"
         if title:
             text = " · ".join([prefix, name, title]) if name else " · ".join([prefix, title])
         elif name:
             text = " · ".join([prefix, name]) + "（无标题）"
         else:
-            text = "自动 · 正在定位对话…"
+            text = "跟随最近 · 正在定位对话…"
         self.lbl_target_info.setText(text)
         self._name = name
         self.lbl_head.setText("让 " + (name or "助手") + " 说话")
@@ -3697,13 +4093,14 @@ class ReadPanel(QFrame):
     def _sync_target_state(self):
         self._target_seq += 1
         target_seq = self._target_seq
+        target_revision = getattr(self.ball, "target_revision", 0)
 
         def worker():
             payload = None
             try:
                 data = api_get("/target", timeout=4)
                 if data.get("ok"):
-                    payload = {**data, "seq": target_seq}
+                    payload = {**data, "seq": target_seq, "target_revision": target_revision}
             except Exception:
                 pass
             if payload is not None and not self._closed:
@@ -3716,6 +4113,8 @@ class ReadPanel(QFrame):
 
     def _apply_target_state(self, data):
         if data.get("seq") != self._target_seq:
+            return
+        if data.get("target_revision", getattr(self.ball, "target_revision", 0)) != getattr(self.ball, "target_revision", 0):
             return
         target = data.get("target")
         if target:

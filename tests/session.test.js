@@ -14,7 +14,7 @@ import path from "node:path";
 const home = fs.mkdtempSync(path.join(os.tmpdir(), "jiegehua-sess-test-"));
 process.env.HANA_HOME = home;
 
-const { extractConversationMessage, buildContextText, findMostActiveSession, lastUserMessageTs, lastTurnInputEntryId, readAllMessages } = await import("../lib/session.js");
+const { extractConversationMessage, buildContextText, findMostActiveSession, findLatestSessionPath, lastUserMessageTs, lastTurnInputEntryId, readAllMessages } = await import("../lib/session.js");
 
 // 构造一条带超长 hana_reference 注入的用户消息（模拟 Hana 实际注入，工具清单 > 旧截断 500）
 function longRefMessage(userText) {
@@ -103,6 +103,14 @@ test("findMostActiveSession 多 agent 间也按用户消息时间选", () => {
   const result = findMostActiveSession();
   assert.equal(result.agentId, "yumi");
   assert.equal(result.sessionPath, fpC);
+});
+
+test("findLatestSessionPath 跳过闲不住送达文本，并兼容旧格式时间戳", () => {
+  const injected = JSON.stringify({ role: "user", ts: "2026-08-11T05:00:00.000Z", content: "📬 收到来自小花的一条互动：🍵安静陪着～" });
+  const real = JSON.stringify({ role: "user", ts: "2026-08-11T06:00:00.000Z", content: "旧格式真实消息" });
+  const fp = writeSession("hanako", "session-pick.jsonl", [injected, real]);
+  const picked = findLatestSessionPath("hanako");
+  assert.equal(picked, fp);
 });
 
 // ═══ 隐式跳过判定：提问归属会话的最后用户消息时间 ═══

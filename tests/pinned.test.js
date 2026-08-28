@@ -12,9 +12,9 @@ import path from "node:path";
 const home = fs.mkdtempSync(path.join(os.tmpdir(), "jiegehua-pinned-test-"));
 process.env.HANA_HOME = home;
 
-const { listRecentSessions, listNamedSessions, findMostActiveSession, readRecentMessages } = await import("../lib/session.js");
+const { listRecentSessions, listNamedSessions, findMostActiveSession, readRecentMessages, isSessionPathForAgent } = await import("../lib/session.js");
 const { normalizeData } = await import("../lib/data.js");
-const { resolveBallTarget } = await import("../lib/zhujian.js");
+const { resolveBallTarget, validatePinnedTargetPath, pinTarget } = await import("../lib/zhujian.js");
 
 function tmpDataDir() {
   const d = fs.mkdtempSync(path.join(os.tmpdir(), "jiegehua-pin-data-"));
@@ -51,6 +51,49 @@ test("normalizeData pinnedTarget 缺失/损坏时置 null", () => {
 test("normalizeData 老数据（无 pinnedTarget 字段）返回 null 不报错", () => {
   const data = normalizeData({ config: { presentation: "ball" }, pending: {} });
   assert.equal(data.pinnedTarget, null);
+});
+
+test("固定目标路径校验：只接受真实 sessions 文件并拒绝越权路径", () => {
+  const valid = writeSession("hanako", "valid-pin.jsonl", [userLine("2026-08-11T01:00:00.000Z", "合法目标")]);
+  assert.deepEqual(validatePinnedTargetPath(valid, "hanako"), {
+    ok: true,
+    sessionPath: valid,
+    agentId: "hanako",
+  });
+  assert.equal(validatePinnedTargetPath(valid, "yumi").ok, false, "助手身份不匹配应拒绝");
+  assert.equal(
+    validatePinnedTargetPath(path.join(home, "agents", "hanako", "sessions", "missing.jsonl"), "hanako").ok,
+    false,
+    "不存在的会话应拒绝",
+  );
+
+  const outsideRoot = fs.mkdtempSync(path.join(os.tmpdir(), "jiegehua-outside-"));
+  const outsideSessions = path.join(outsideRoot, "agents", "hanako", "sessions");
+  fs.mkdirSync(outsideSessions, { recursive: true });
+  const outside = path.join(outsideSessions, "escape.jsonl");
+  fs.writeFileSync(outside, userLine("2026-08-11T01:00:00.000Z", "目录外目标") + "\n");
+  assert.equal(isSessionPathForAgent(outside, "hanako"), false, "真实路径在 Hana 目录外应拒绝");
+  assert.equal(validatePinnedTargetPath(outside, "hanako").ok, false);
+  fs.rmSync(valid, { force: true });
+});
+
+test("pinTarget：合法 / 越权 / 不存在 / 目录外四类请求返回明确结果", async () => {
+  const dataDir = tmpDataDir();
+  const valid = writeSession("pin-agent", "endpoint-valid.jsonl", [userLine("2026-08-11T01:00:00.000Z", "端点合法目标")]);
+  const ok = await pinTarget(dataDir, { agentId: "pin-agent", sessionPath: valid, title: "端点目标" });
+  assert.equal(ok.status, 200);
+  assert.equal(ok.body.mode, "pinned");
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dataDir, "data.json"), "utf-8")).pinnedTarget.sessionPath, valid);
+
+  assert.equal((await pinTarget(dataDir, { agentId: "yumi", sessionPath: valid })).status, 400, "越权助手应拒绝");
+  assert.equal((await pinTarget(dataDir, { agentId: "pin-agent", sessionPath: path.join(home, "agents", "pin-agent", "sessions", "missing.jsonl") })).status, 400, "不存在路径应拒绝");
+  const outsideRoot = fs.mkdtempSync(path.join(os.tmpdir(), "jiegehua-pin-endpoint-outside-"));
+  const outsideDir = path.join(outsideRoot, "agents", "pin-agent", "sessions");
+  fs.mkdirSync(outsideDir, { recursive: true });
+  const outside = path.join(outsideDir, "outside.jsonl");
+  fs.writeFileSync(outside, userLine("2026-08-11T01:00:00.000Z", "目录外") + "\n");
+  assert.equal((await pinTarget(dataDir, { agentId: "pin-agent", sessionPath: outside })).status, 400, "目录外路径应拒绝");
+  fs.rmSync(path.dirname(path.dirname(valid)), { recursive: true, force: true });
 });
 
 // ═══ listRecentSessions：排序 / 摘要 / 过滤 ═══
@@ -100,9 +143,10 @@ test("listNamedSessions 优先使用 Hana 返回的真实会话标题", async ()
     },
   };
   const list = await listNamedSessions(bus, 8);
-  assert.equal(list.length, 1);
-  assert.equal(list[0].title, "解语花自动追踪改造");
-  assert.equal(list[0].agentName, "小花");
+  const named = list.find((item) => item.sessionPath === fp);
+  assert.ok(named, "宿主返回的窗口应保留在合并结果中");
+  assert.equal(named.title, "解语花自动追踪改造");
+  assert.equal(named.agentName, "小花");
 });
 
 test("listNamedSessions 从会话路径补出缺失的助手身份", async () => {
@@ -119,6 +163,24 @@ test("listNamedSessions 从会话路径补出缺失的助手身份", async () =>
   assert.equal(list[0].agentName, "路径助手");
 });
 
+test("listNamedSessions 合并宿主窗口与本地窗口，并把秒级 modified 转成毫秒", async () => {
+  const local = writeSession("merge-agent", "local.jsonl", [userLine("2026-08-11T09:00:00.000Z", "本地补齐窗口")]);
+  const hostDir = path.join(home, "agents", "merge-agent", "sessions");
+  const hostOnly = path.join(hostDir, "host-only.jsonl");
+  fs.writeFileSync(hostOnly, JSON.stringify({ type: "session", status: "active" }) + "\n", "utf-8");
+  const modifiedSeconds = Math.floor(Date.parse("2026-08-11T10:00:00.000Z") / 1000);
+  const list = await listNamedSessions({
+    request: async () => ({
+      sessions: [{ path: hostOnly, agentId: "merge-agent", title: "宿主窗口", modified: modifiedSeconds }],
+    }),
+  }, 20);
+  assert.ok(list.some((item) => item.sessionPath === local), "宿主缺失的本地窗口应保留");
+  const hostItem = list.find((item) => item.sessionPath === hostOnly);
+  assert.equal(hostItem.title, "宿主窗口");
+  assert.equal(hostItem.lastUserTime, modifiedSeconds * 1000);
+  fs.rmSync(path.dirname(path.dirname(local)), { recursive: true, force: true });
+});
+
 test("listNamedSessions 总线挂起时回退，不让目标选择一直等", async () => {
   const started = Date.now();
   const list = await listNamedSessions({ request: async () => new Promise(() => {}) }, 1);
@@ -131,7 +193,7 @@ test("listNamedSessions 按活跃时间排序并压缩为指定的 5 个窗口",
     path: `C:/sessions/${i}.jsonl`,
     title: `窗口 ${i}`,
     agentId: "hanako",
-    modified: new Date(2026, 7, 11, 10, i).toISOString(),
+    modified: new Date(2099, 7, 11, 10, i).toISOString(),
   }));
   const list = await listNamedSessions({ request: async () => ({ sessions }) }, 5);
   assert.equal(list.length, 5);

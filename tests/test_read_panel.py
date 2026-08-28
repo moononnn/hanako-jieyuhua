@@ -82,7 +82,7 @@ class ReadPanelTests(QtTestCase):
         self.assertFalse(rp.btn_sub_fav.isEnabled())
         self.assertFalse(rp.btn_replay.isEnabled())
         self.assertEqual(rp.btn_play.text(), "🔊 朗读")
-        self.assertIn("自动判断", rp.btn_target.text())
+        self.assertIn("跟随最近", rp.btn_target.text())
         self.assertIn("最新回复", rp.btn_reply.text())
         self.assertEqual(rp.btn_refresh_replies.text(), "↻ 刷新")
         self.assertFalse(hasattr(rp, "btn_sub_new"))
@@ -499,7 +499,7 @@ class ReadPanelPositionTests(QtTestCase):
         ball.close()
         app.processEvents()
 
-    def test_target_choices_show_assistant_name_before_title(self):
+    def test_target_choices_mix_recent_sessions_without_assistant_label(self):
         app, ball, rp = self._panel_on_ball(bx=300, by=400)
         menu = rp.target_menu
         menu._request_seq = 1
@@ -518,7 +518,7 @@ class ReadPanelPositionTests(QtTestCase):
         })
         item = menu.list_box.itemAt(0).widget()
         self.assertIsNotNone(item)
-        self.assertIn("小花", item.text())
+        self.assertNotIn("小花", item.text())
         self.assertIn("正在改朗读面板", item.text())
         menu._request_seq = 2
         menu._apply_sessions({"seq": 2, "mode": "auto", "pinned": None, "sessions": [], "error": ""})
