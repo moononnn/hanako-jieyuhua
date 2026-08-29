@@ -85,6 +85,10 @@ export default function registerPluginApiRoutes(app, ctx) {
       if (typeof body.guideDismissed === "boolean") patch.guideDismissed = body.guideDismissed;
       if (Array.isArray(body.styles)) patch.styles = body.styles;
       if (body.selectedByCount && typeof body.selectedByCount === "object") patch.selectedByCount = body.selectedByCount;
+      if (body.askFlower && typeof body.askFlower === "object") {
+        const curAsk = (getConfig(dataDir).askFlower) || {};
+        if (typeof body.askFlower.enabled === "boolean") patch.askFlower = { ...curAsk, enabled: body.askFlower.enabled };
+      }
 
       const m = body.model || {};
       if (["agent", "hana", "custom"].includes(m.source)) {

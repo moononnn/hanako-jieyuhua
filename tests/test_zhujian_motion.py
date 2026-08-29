@@ -432,6 +432,69 @@ class ZhujianMotionTests(QtTestCase):
         ball.close()
         app.processEvents()
 
+    def test_ask_flower_visibility_follows_runtime_config_and_panel_modes(self):
+        app = zhujian.QApplication.instance() or zhujian.QApplication([])
+        ball = zhujian.ZhujianBall()
+        menu = zhujian.ZhujianMenu(ball)
+        ball.menu = menu
+        menu.show()
+        app.processEvents()
+
+        ball._apply_ask_payload({"ok": True, "pending": [], "ask_flower_enabled": False})
+        app.processEvents()
+        self.assertTrue(menu.ask_flower_tool.isHidden())
+
+        ball._apply_ask_payload({"ok": True, "pending": [], "ask_flower_enabled": True})
+        app.processEvents()
+        self.assertFalse(menu.ask_flower_tool.isHidden())
+
+        menu.show_ask({
+            "askId": "ask-config-visibility",
+            "question": "测试状态切换",
+            "options": [{"label": "甲"}, {"label": "乙"}],
+            "ts": 1,
+        })
+        app.processEvents()
+        self.assertTrue(menu.ask_flower_tool.isHidden(), "提问态不能把普通入口带出来")
+
+        menu._ask_finished = True
+        menu.finish_ask_and_collapse("ask-config-visibility")
+        menu.show()
+        menu.prepare_for_show()
+        app.processEvents()
+        self.assertFalse(menu.ask_flower_tool.isHidden())
+
+        menu._resume_entry = {"resumeId": "resume-config-visibility"}
+        menu._resume_finished = False
+        menu._set_resume_mode(True)
+        app.processEvents()
+        self.assertTrue(menu.ask_flower_tool.isHidden(), "断联态不能把普通入口带出来")
+        menu._set_resume_mode(False)
+        app.processEvents()
+        self.assertFalse(menu.ask_flower_tool.isHidden())
+
+        menu.close()
+        ball.close()
+        app.processEvents()
+
+    def test_disabling_ask_flower_closes_open_dialog(self):
+        app = zhujian.QApplication.instance() or zhujian.QApplication([])
+        ball = zhujian.ZhujianBall()
+        dialog = zhujian.AskFlowerDialog(ball)
+        ball.ask_flower_dialog = dialog
+        dialog.show()
+        app.processEvents()
+        self.assertTrue(dialog.isVisible())
+
+        ball._apply_ask_flower_config(False)
+        app.processEvents()
+        self.assertFalse(dialog.isVisible(), "关闭入口时不能留下独立问答弹窗")
+        self.assertFalse(ball.ask_flower_enabled)
+
+        dialog.close()
+        ball.close()
+        app.processEvents()
+
     def test_tool_rows_survive_narrow_panel_width(self):
         # 回归：标题工具的两个动作在窄面板下换到说明下面，不挤压文字或越界。
         app = zhujian.QApplication.instance() or zhujian.QApplication([])

@@ -336,7 +336,24 @@ ${hanaCss ? `<link rel="stylesheet" href="${escapeAttr(hanaCss)}">` : ""}
     padding: 7px 0;
     cursor: pointer;
   }
-  .dgh-opt input[type=radio] { margin-top: 3px; accent-color: var(--dgh-accent-deep); }
+  .dgh-opt input[type=radio], .dgh-opt input[type=checkbox] { margin-top: 3px; accent-color: var(--dgh-accent-deep); }
+  /* 拨动开关（与表情包插件同一套视觉） */
+  .dgh-toggle {
+    display: inline-flex; align-items: center; cursor: pointer; flex-shrink: 0;
+    padding: 3px; border: 1px solid var(--dgh-rule); border-radius: 999px; background: var(--dgh-paper);
+    transition: border-color .15s, background .15s;
+  }
+  .dgh-toggle:hover { border-color: var(--dgh-accent); }
+  .dgh-toggle-track {
+    width: 36px; height: 20px; border-radius: 999px; background: var(--dgh-rule);
+    position: relative; flex-shrink: 0; transition: background .2s;
+  }
+  .dgh-toggle-knob {
+    position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%;
+    background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.18); transition: left .2s;
+  }
+  .dgh-toggle.on .dgh-toggle-track { background: var(--dgh-accent-deep); }
+  .dgh-toggle.on .dgh-toggle-knob { left: 18px; }
   .dgh-opt-title { font-size: 13px; display: block; }
   .dgh-opt-desc { font-size: 11px; color: var(--dgh-sub); display: block; margin-top: 1px; }
   .dgh-field { margin: 8px 0; }
@@ -636,6 +653,19 @@ ${hanaCss ? `<link rel="stylesheet" href="${escapeAttr(hanaCss)}">` : ""}
     ${radio("count", "2", cfg.count === 2, "2 条")}
     ${radio("count", "3", cfg.count === 3, "3 条")}
     ${radio("count", "4", cfg.count === 4, "4 条")}
+  </div>
+
+  <div class="dgh-card">
+    <div class="dgh-card-title">问问小花（快捷入口）</div>
+    <div class="dgh-sub">悬浮球面板里随手查 Hana 用法的快捷通道，内容基于 Hana 内置的 user-guide 说明书 skill 整理。默认关闭，需要的话打开</div>
+    <label class="dgh-opt" style="cursor:pointer">
+      <span class="dgh-toggle${(cfg.askFlower && cfg.askFlower.enabled) ? " on" : ""}" id="dgh-ask-flower-enable" role="switch" aria-checked="${(cfg.askFlower && cfg.askFlower.enabled) ? "true" : "false"}">
+        <span class="dgh-toggle-track"><span class="dgh-toggle-knob"></span></span>
+      </span>
+      <span class="dgh-opt-body">
+        <span class="dgh-opt-title">在悬浮球面板显示「问问小花」入口</span>
+      </span>
+    </label>
   </div>
 
   <div class="dgh-card">
@@ -1397,6 +1427,15 @@ function buildSettingsClientJs(apiBase, state) {
     r.addEventListener("change", function(){
       saveField({ action: radioValue("action") || "send" });
     });
+  });
+
+  // ── 问问小花开关：拨动开关，即时保存 ──
+  var askFlowerEnable = $("dgh-ask-flower-enable");
+  if (askFlowerEnable) askFlowerEnable.addEventListener("click", function(){
+    var next = !askFlowerEnable.classList.contains("on");
+    askFlowerEnable.classList.toggle("on", next);
+    askFlowerEnable.setAttribute("aria-checked", next ? "true" : "false");
+    saveField({ askFlower: { enabled: next } });
   });
 
   // 提前绑定（不依赖后面代码执行）

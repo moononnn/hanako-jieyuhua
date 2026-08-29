@@ -919,7 +919,7 @@ class AskFlowerDialog(FadeOnLeaveMixin, QFrame):
         title = QLabel("❓ 问问小花")
         title.setObjectName("menuTitle")
         root.addWidget(title)
-        subtitle = QLabel("想问 Hana 的用法？点这里问问小花就行哈")
+        subtitle = QLabel("想问 Hana 使用上的问题？点这里问问小花，基于 Hana 内置的 user-guide 说明书 skill，帮你更方便地解答")
         subtitle.setObjectName("menuSub")
         subtitle.setWordWrap(True)
         root.addWidget(subtitle)
@@ -1530,6 +1530,8 @@ class ZhujianBall(QWidget):
         self.state["fusionPanel"] = "none"
         save_state(self.state)
         self.action = self.state.get("action") or "copy"
+        # 可选入口默认先隐藏；首次配置同步成功后再显示，配置读取失败时不误开放。
+        self.ask_flower_enabled = False
         self.cached = None
         self.target_name = ""
         self.target_title = ""
@@ -1649,17 +1651,33 @@ class ZhujianBall(QWidget):
         self._ask_poll_inflight = True
 
         def worker():
-            payload = {"ok": False, "pending": [], "resume": [], "resumeAuto": False, "resumeNotices": []}
+            payload = {
+                "ok": False,
+                "pending": [],
+                "resume": [],
+                "resumeAuto": False,
+                "resumeNotices": [],
+                "ask_flower_enabled": None,
+            }
+            # 配置与提问共用本地代理轮询：设置页改完后无需重启即可同步到面板。
+            try:
+                config = api_get("/config", timeout=4)
+                if config.get("ok"):
+                    ask_config = config.get("config") or {}
+                    ask_flower = ask_config.get("askFlower") or {}
+                    payload["ask_flower_enabled"] = ask_flower.get("enabled") is True
+            except Exception:
+                pass
             try:
                 data = api_get("/ask/pending", timeout=4)
                 if data.get("ok"):
-                    payload = {
+                    payload.update({
                         "ok": True,
                         "pending": data.get("pending") or [],
                         "resume": data.get("resume") or [],
                         "resumeAuto": bool(data.get("resumeAuto")),
                         "resumeNotices": data.get("resumeNotices") or [],
-                    }
+                    })
             except Exception:
                 pass
             if self._closed:
@@ -1673,6 +1691,8 @@ class ZhujianBall(QWidget):
 
     def _apply_ask_payload(self, payload):
         self._ask_poll_inflight = False
+        if payload.get("ask_flower_enabled") is not None:
+            self._apply_ask_flower_config(payload["ask_flower_enabled"])
         if not payload.get("ok"):
             return
         # 自动续接成功的短暂提示（面板可见时显示）
@@ -1751,6 +1771,20 @@ class ZhujianBall(QWidget):
         elif self.menu is not None and self.menu.is_resume_open():
             # 断联卡消失（已继续/用户自己接手/过期）后收起
             self.menu.finish_resume_and_collapse()
+
+    def _apply_ask_flower_config(self, enabled):
+        """把代理返回的可选入口开关同步到主面板与独立问答窗。"""
+        enabled = bool(enabled)
+        self.ask_flower_enabled = enabled
+        if self.menu is not None:
+            self.menu.set_ask_flower_enabled(enabled)
+        if enabled:
+            return
+        dialog = self.ask_flower_dialog
+        if dialog is not None and dialog.isVisible():
+            dialog.close()
+            if self.menu is None or not self.menu.is_ask_open():
+                self._set_fusion_panel_state("none")
 
     def _sync_theme(self):
         mode = read_hana_theme_mode()
@@ -2564,6 +2598,7 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
         self._ask_max_selections = 1
         self._ask_selected_indices = []
         self._ask_option_labels = []
+        self._ask_flower_enabled = False
         # 断联续接（resume）状态：窗口异常停止时的小卡片
         self._closed = False  # 菜单不销毁但 worker 守卫会引用 _closed（Ball/ReadPanel 都有，菜单漏了——2026-08-27 实机踩到：缺失导致 worker 抛 AttributeError，emit 永不执行，按钮永远「发送中」）
         self._resume_entry = None
@@ -2580,6 +2615,7 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
         self.undo_ready.connect(self._apply_undo_result)
         self.ask_response_ready.connect(self._apply_ask_response)
         self._build_ui()
+        self.set_ask_flower_enabled(getattr(self.ball, "ask_flower_enabled", False))
         self.setup_fade_on_leave()
 
     def _build_ui(self):
@@ -2778,7 +2814,7 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
         say_row.addWidget(self.btn_say)
         root.addWidget(self.say_tool)
 
-        # 问问小花：问 Hana 用法，发到当前会话由助手加载内置说明书 skill 回答
+        # 问问小花：问 Hana 用法，弹窗内用解语花配置的模型直接回答（不注入真实会话）
         self.ask_flower_tool = QFrame()
         self.ask_flower_tool.setObjectName("toolRow")
         ask_flower_row = QHBoxLayout(self.ask_flower_tool)
@@ -2789,7 +2825,7 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
         self.lbl_ask_flower_title = QLabel("问问小花")
         self.lbl_ask_flower_title.setObjectName("toolTitle")
         ask_flower_copy.addWidget(self.lbl_ask_flower_title)
-        self.lbl_ask_flower_desc = QLabel("想问 Hana 的用法？点这里问问小花就行哈")
+        self.lbl_ask_flower_desc = QLabel("想问 Hana 使用上的问题？点这里问问小花，基于 Hana 内置的 user-guide 说明书 skill，帮你更方便地解答")
         self.lbl_ask_flower_desc.setObjectName("toolDesc")
         self.lbl_ask_flower_desc.setWordWrap(True)
         ask_flower_copy.addWidget(self.lbl_ask_flower_desc)
@@ -2991,6 +3027,17 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
         if self.target_menu is not None:
             self.target_menu.apply_theme()
 
+    def set_ask_flower_enabled(self, enabled):
+        """按配置显隐「问问小花」入口；提问/断联模式下始终隐藏。"""
+        self._ask_flower_enabled = bool(enabled)
+        if not hasattr(self, "ask_flower_tool"):
+            return
+        visible = self._ask_flower_enabled and not self.is_ask_open() and not self.is_resume_open()
+        self.ask_flower_tool.setVisible(visible)
+        self.ask_flower_tool.setEnabled(self._ask_flower_enabled)
+        if self.isVisible():
+            self._schedule_size_sync()
+
     def prepare_for_show(self):
         # 普通面板/提问态恢复为原来的互动层；断联卡会在 show_resume 中临时降级。
         self._set_window_stays_on_top(True)
@@ -3078,7 +3125,7 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
             for widget in (
                 self.lbl_target_label, self.btn_target, self.lbl_target_info,
                 self.recommend_body,
-                self.lbl_section, self.say_tool, self.rename_tool, self.lbl_hint,
+                self.lbl_section, self.say_tool, self.ask_flower_tool, self.rename_tool, self.lbl_hint,
             ):
                 widget.hide()
             self.target_menu.hide()
@@ -3109,6 +3156,7 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
                 self.lbl_section, self.say_tool, self.rename_tool, self.lbl_hint,
             ):
                 widget.show()
+            self.set_ask_flower_enabled(self._ask_flower_enabled)
             self.ask_scroll.hide()
             self.ask_input.hide()
             self.btn_ask_skip.hide()
@@ -3408,7 +3456,7 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
             for widget in (
                 self.lbl_target_label, self.btn_target, self.lbl_target_info,
                 self.recommend_body,
-                self.lbl_section, self.say_tool, self.rename_tool, self.lbl_hint,
+                self.lbl_section, self.say_tool, self.ask_flower_tool, self.rename_tool, self.lbl_hint,
             ):
                 widget.hide()
             self.target_menu.hide()
@@ -3430,6 +3478,7 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
                 widget.show()
             self.resume_body.hide()
             self._resume_entry = None
+            self.set_ask_flower_enabled(self._ask_flower_enabled)
 
     def _render_resume(self, resume):
         title = str(resume.get("sessionTitle") or "").strip()
@@ -3623,6 +3672,8 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
 
     def _open_ask_flower(self):
         """点「问问小花」：收起推荐面板，弹提问窗，用解语花自己配置的模型直接回答。"""
+        if not getattr(self.ball, "ask_flower_enabled", False):
+            return
         if self.ball.ask_flower_dialog is None:
             self.ball.ask_flower_dialog = AskFlowerDialog(self.ball)
         self.close_menu()

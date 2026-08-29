@@ -17,7 +17,7 @@ function tmpDir() {
 // 文件级固定 HANA_HOME：先设 env 再 import zhujian.js（session.js 依赖缓存）
 const BASE = tmpDir();
 process.env.HANA_HOME = BASE;
-const { sendAskFlower } = await import("../lib/zhujian.js");
+const { sendAskFlower, zhujianConfigPayload } = await import("../lib/zhujian.js");
 
 function okSample(answer = "侧边栏底部可以归档旧会话，归档后可在设置里恢复或永久删除。") {
   let calls = 0;
@@ -79,4 +79,21 @@ test("sendAskFlower：无 sampleFn 且 agent 档 → 明确报错", async () => 
   const r = await sendAskFlower(dir, null, { text: "问个问题" }, null);
   assert.equal(r.ok, false);
   assert.match(r.error, /模型/);
+});
+
+test("askFlower 配置：默认关闭，归一化后仍保持布尔", async () => {
+  const { DEFAULT_CONFIG, normalizeConfig } = await import("../lib/data.js");
+  assert.equal(DEFAULT_CONFIG.askFlower.enabled, false, "问问小花开关默认关闭");
+  assert.equal(normalizeConfig(undefined).askFlower.enabled, false, "无配置时默认关闭");
+  assert.equal(normalizeConfig({ askFlower: { enabled: true } }).askFlower.enabled, true);
+  assert.equal(normalizeConfig({ askFlower: { enabled: "yes" } }).askFlower.enabled, false, "非法值归一为 false");
+});
+
+test("悬浮球配置代理只暴露问问小花的显隐状态", () => {
+  assert.deepEqual(zhujianConfigPayload({ presentation: "ball", action: "send", askFlower: { enabled: true } }), {
+    presentation: "ball",
+    action: "send",
+    askFlower: { enabled: true },
+  });
+  assert.equal(zhujianConfigPayload({}).askFlower.enabled, false, "缺省配置必须按关闭处理");
 });
