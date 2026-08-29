@@ -885,6 +885,343 @@ class SendModeMenu(FadeOnLeaveMixin, QFrame):
 
 
 # ─────────────────────────────
+#  问问小花输入弹窗（右键浮签 → 问一个 Hana 使用问题，发到当前会话）
+# ─────────────────────────────
+class AskFlowerDialog(FadeOnLeaveMixin, QFrame):
+    """输入 HanaAgent 使用问题，POST /ask-flower 发到当前活跃会话，
+    由助手加载内置说明书 skill 回答。样式对齐右键浮签（手帐风、霞鹜文楷）。"""
+
+    def __init__(self, ball):
+        super().__init__(None)
+        self.ball = ball
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+            | Qt.WindowType.NoDropShadowWindowHint
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setObjectName("askFlowerDialog")
+        self.setFixedWidth(250)
+        # 与朗读弹窗同一套双窗拖动：面板与花朵保持相对距离一起动；用户拖过后不再自动重新锚定
+        self._drag_press = None
+        self._drag_panel_start = None
+        self._drag_ball_start = None
+        self._drag_moved = False
+        self._user_dragged = False
+        self.side = "left"
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(14, 13, 14, 12)
+        root.setSpacing(7)
+
+        title = QLabel("❓ 问问小花")
+        title.setObjectName("menuTitle")
+        root.addWidget(title)
+        subtitle = QLabel("想问 Hana 的用法？点这里问问小花就行哈")
+        subtitle.setObjectName("menuSub")
+        subtitle.setWordWrap(True)
+        root.addWidget(subtitle)
+
+        self.input = QLineEdit()
+        self.input.setObjectName("askFlowerInput")
+        self.input.setPlaceholderText("比如：怎么归档旧会话？")
+        self.input.returnPressed.connect(self._send)
+        # 输入框有焦点时保持不透明（用户可能鼠标不在窗内，但正在打字，不该淡出）
+        self.input._ask_orig_focus_in = self.input.focusInEvent
+        self.input._ask_orig_focus_out = self.input.focusOutEvent
+        self.input.focusInEvent = self._on_input_focus_in
+        self.input.focusOutEvent = self._on_input_focus_out
+        root.addWidget(self.input)
+
+        # 回答显示区（可滚动，支持长回答）
+        self.answer_scroll = QScrollArea()
+        self.answer_scroll.setObjectName("askFlowerAnswerScroll")
+        self.answer_scroll.setWidgetResizable(True)
+        self.answer_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.answer_scroll.setMaximumHeight(180)
+        self.answer_scroll.hide()
+        self.answer_body = QLabel("")
+        self.answer_body.setObjectName("askFlowerAnswer")
+        self.answer_body.setWordWrap(True)
+        self.answer_body.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        self.answer_body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.answer_scroll.setWidget(self.answer_body)
+        root.addWidget(self.answer_scroll)
+
+        btns = QHBoxLayout()
+        btns.setSpacing(6)
+        self.btn_cancel = QPushButton("取消")
+        self.btn_cancel.setObjectName("askFlowerCancel")
+        self.btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_cancel.clicked.connect(self.close)
+        btns.addWidget(self.btn_cancel, 1)
+        self.btn_send = QPushButton("提问")
+        self.btn_send.setObjectName("askFlowerSend")
+        self.btn_send.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_send.clicked.connect(self._send)
+        btns.addWidget(self.btn_send, 1)
+        root.addLayout(btns)
+
+        self.lbl_status = QLabel("")
+        self.lbl_status.setObjectName("menuSub")
+        self.lbl_status.setWordWrap(True)
+        self.lbl_status.hide()
+        root.addWidget(self.lbl_status)
+
+        self.apply_theme()
+        self.setup_fade_on_leave()
+
+    def enterEvent(self, event):
+        super().enterEvent(event)
+        self._on_fade_enter()
+
+    def leaveEvent(self, event):
+        super().leaveEvent(event)
+        self._on_fade_leave()
+
+    def _on_input_focus_in(self, event):
+        # 聚焦输入框：立即恢复不透明并取消淡出排期
+        self._fade_out_timer.stop()
+        self._fade_to(1.0, FADE_IN_DURATION_MS)
+        orig = getattr(self.input, "_ask_orig_focus_in", None)
+        if orig is not None:
+            orig(event)
+
+    def _on_input_focus_out(self, event):
+        # 失焦：恢复正常淡出判定（鼠标不在窗内则按排期淡出）
+        if self._fade_allowed() and not self._cursor_inside():
+            self._fade_out_timer.start(FADE_OUT_DELAY_MS)
+        orig = getattr(self.input, "_ask_orig_focus_out", None)
+        if orig is not None:
+            orig(event)
+
+    def _fade_allowed(self):
+        # 输入框有焦点 = 用户正在打字，保持实体不淡出
+        return not self.input.hasFocus()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._reset_fade_on_show()
+        self.input.setFocus()
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self._cancel_fade()
+        try:
+            self.ball._set_fusion_panel_state("none")
+        except Exception:
+            pass
+
+    def apply_theme(self):
+        c = THEME_COLORS[self.ball.theme_mode]
+        self.setStyleSheet(f"""
+            #askFlowerDialog {{
+                background: transparent; border: none;
+                font-family: "LXGW WenKai", "Microsoft YaHei UI";
+            }}
+            QLabel {{ background: transparent; color: {c['ink']}; }}
+            QLabel#menuTitle {{ font-size: 14px; font-weight: 700; color: {c['accent_deep']}; }}
+            QLabel#menuSub {{ font-size: 10px; color: {c['sub']}; padding-bottom: 2px; }}
+            QLineEdit#askFlowerInput {{
+                min-height: 30px; padding: 0 10px;
+                color: {c['ink']}; background: {c['surface']};
+                border: 1px solid {c['border']}; border-radius: 9px; font-size: 12px;
+            }}
+            QLineEdit#askFlowerInput:focus {{ border-color: {c['accent']}; }}
+            QScrollArea#askFlowerAnswerScroll {{ background: transparent; border: none; }}
+            QScrollArea#askFlowerAnswerScroll > QWidget > QWidget {{ background: transparent; }}
+            QScrollBar:vertical {{
+                width: 8px; background: transparent; margin: 3px 0;
+            }}
+            QScrollBar::handle:vertical {{
+                min-height: 26px; background: #c9dfd3; border-radius: 4px;
+            }}
+            QScrollBar::handle:vertical:hover {{ background: {c['accent']}; }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
+            QLabel#askFlowerAnswer {{
+                background: {c['surface']}; color: {c['ink']};
+                border: 1px solid {c['border']}; border-radius: 9px;
+                padding: 8px 10px; font-size: 12px;
+            }}
+            QPushButton {{ min-height: 28px; border-radius: 9px; font-size: 11px; }}
+            QPushButton#askFlowerCancel {{
+                color: {c['sub']}; background: transparent; border: 1px solid {c['border']};
+            }}
+            QPushButton#askFlowerCancel:hover {{ background: {c['surface_alt']}; }}
+            QPushButton#askFlowerSend {{
+                color: {c['panel']}; background: {c['accent_deep']}; border: none; font-weight: 700;
+            }}
+            QPushButton#askFlowerSend:hover {{ background: {c['accent']}; }}
+            QPushButton#askFlowerSend:disabled {{ background: {c['border']}; }}
+        """)
+
+    def show_near_ball(self):
+        self.apply_theme()
+        self.adjustSize()
+        ball = self.ball
+        screen = ball.screen() or QApplication.primaryScreen()
+        geo = screen.availableGeometry()
+        x, y, side = position_popup_left_first(
+            (ball.x(), ball.y(), ball.width(), ball.height()),
+            (self.width(), self.height()),
+            (geo.left(), geo.top(), geo.right() + 1, geo.bottom() + 1),
+            gap=8,
+            anchor_ratio=PANEL_ANCHOR_RATIO,
+        )
+        self.side = side
+        self._user_dragged = False
+        self.move(x, y)
+        self.show()
+        self.raise_()
+        self.input.setFocus()
+
+    def _reanchor(self):
+        """回答区撑高后重新定位：没拖过按球锚定，拖过保持原位不跳。"""
+        self.adjustSize()
+        if self._user_dragged:
+            screen = self.ball.screen() or QApplication.primaryScreen()
+            geo = screen.availableGeometry()
+            x = max(geo.left(), min(self.x(), geo.right() - self.width() + 1))
+            y = max(geo.top(), min(self.y(), geo.bottom() - self.height() + 1))
+            self.move(x, y)
+        else:
+            self.show_near_ball()
+
+    # ── 双窗拖动：按住空白处，面板与花朵保持相对距离一起动（与朗读弹窗一致） ──
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self._drag_press = e.globalPosition().toPoint()
+            self._drag_panel_start = self.pos()
+            self._drag_ball_start = self.ball.pos()
+            self._drag_moved = False
+            reset_motion = getattr(self.ball, "_reset_drag_motion", None)
+            if callable(reset_motion):
+                reset_motion()
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):
+        if self._drag_press is not None and (e.buttons() & Qt.MouseButton.LeftButton):
+            cur = e.globalPosition().toPoint()
+            delta = cur - self._drag_press
+            if not self._drag_moved:
+                if delta.manhattanLength() < QApplication.startDragDistance():
+                    return
+                self._drag_moved = True
+                self._user_dragged = True
+            screen = self.ball.screen() or QApplication.primaryScreen()
+            geo = screen.availableGeometry()
+            dx = max(geo.left() - self._drag_panel_start.x(), min(delta.x(), geo.right() - self.width() + 1 - self._drag_panel_start.x()))
+            dy = max(geo.top() - self._drag_panel_start.y(), min(delta.y(), geo.bottom() - self.height() + 1 - self._drag_panel_start.y()))
+            self.move(self._drag_panel_start + QPoint(dx, dy))
+            self.ball.move(self._drag_ball_start + QPoint(dx, dy))
+            record_motion = getattr(self.ball, "_record_drag_motion", None)
+            if callable(record_motion):
+                record_motion()
+        super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            if self._drag_moved:
+                release_motion = getattr(self.ball, "_release_drag_motion", None)
+                if callable(release_motion):
+                    release_motion()
+                try:
+                    self.ball._save_pos()
+                except Exception:
+                    pass
+            self._drag_press = None
+            self._drag_panel_start = None
+            self._drag_ball_start = None
+        super().mouseReleaseEvent(e)
+
+    def _set_busy(self, busy):
+        self.btn_send.setEnabled(not busy)
+        self.btn_cancel.setEnabled(not busy)
+        self.input.setEnabled(not busy)
+
+    def _send(self):
+        text = self.input.text().strip()
+        if not text:
+            self.lbl_status.setText("写点什么再问嘛～")
+            self.lbl_status.show()
+            return
+        self._set_busy(True)
+        # 提交新问题时先清掉上一次的答案：思考中只留「正在想答案…」，
+        # 否则旧答案挂在上面，第一眼分不清第二个问题到底答了没
+        self.answer_body.clear()
+        self.answer_scroll.hide()
+        self.lbl_status.setText("小花正在想答案…")
+        self.lbl_status.show()
+        self.adjustSize()
+        self._reanchor()
+
+        state = {"result": None, "done": False}
+
+        def run():
+            try:
+                state["result"] = api_post("/ask-flower", {"text": text}, timeout=35)
+            except urllib.error.HTTPError as e:
+                # 读响应体里的 error 字段，把真实原因透出来（比「HTTP Error 400」有用得多）
+                body = ""
+                try:
+                    body = e.read().decode("utf-8", "replace")
+                except Exception:
+                    body = ""
+                detail = ""
+                try:
+                    parsed = json.loads(body)
+                    detail = parsed.get("error") or ""
+                except Exception:
+                    detail = body[:120]
+                state["result"] = {"ok": False, "error": detail or f"小花拒绝了（{e}）"}
+            except Exception as e:
+                state["result"] = {"ok": False, "error": f"连不上小花（{e}），看看悬浮球还开着没"}
+            state["done"] = True
+
+        threading.Thread(target=run, daemon=True, name="ask-flower-worker").start()
+        timer = QTimer(self)
+        timer.setInterval(150)
+
+        def tick():
+            if not state["done"]:
+                return
+            timer.stop()
+            self._set_busy(False)
+            result = state["result"] or {}
+            if result.get("ok"):
+                # 就地显示回答，不关弹窗：看完可以继续问下一个
+                answer = result.get("answer") or ""
+                self.answer_body.setText(answer)
+                self.answer_scroll.show()
+                self.lbl_status.setText("")
+                self.lbl_status.hide()
+                self.input.clear()
+                self.input.setFocus()
+                self.adjustSize()
+                self._reanchor()
+            else:
+                self.lbl_status.setText(result.get("error") or "发送失败，再试一次")
+                self.lbl_status.setStyleSheet("")
+                self.lbl_status.show()
+
+        timer.timeout.connect(tick)
+        timer.start()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        c = THEME_COLORS[self.ball.theme_mode]
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QColor(c["border"]))
+        painter.setBrush(QColor(c["panel"]))
+        painter.drawRoundedRect(self.rect().adjusted(1, 1, -1, -1), 16, 16)
+        painter.end()
+
+
+# ─────────────────────────────
 #  推荐目标选择浮签（面板右上角下拉）
 # ─────────────────────────────
 class TargetMenu(QFrame):
@@ -1260,11 +1597,14 @@ class ZhujianBall(QWidget):
         self._moved = False
         self._drag_menu_was_visible = False
         self._drag_read_was_visible = False
+        self._drag_ask_was_visible = False
         self._drag_menu_start = None
         self._drag_read_start = None
+        self._drag_ask_start = None
         self._drag_ball_start = None
         self.menu = None
         self.read_panel = None        # 独立朗读窗口（由主面板「念给我听」打开）
+        self.ask_flower_dialog = None  # 「问问小花」输入弹窗（右键浮签打开，懒创建）
         self._ask_poll_inflight = False
         self.ask_ready.connect(self._apply_ask_payload)
         # 右键浮签不再是 Popup（Popup 会抢在 toggle 前自动关闭，无法实现"再按一次右键收起"），
@@ -1977,8 +2317,10 @@ class ZhujianBall(QWidget):
         if e.button() == Qt.MouseButton.LeftButton:
             self._drag_menu_was_visible = bool(self.menu and self.menu.isVisible())
             self._drag_read_was_visible = bool(self.read_panel and self.read_panel.isVisible())
+            self._drag_ask_was_visible = bool(self.ask_flower_dialog and self.ask_flower_dialog.isVisible())
             self._drag_menu_start = self.menu.pos() if self._drag_menu_was_visible else None
             self._drag_read_start = self.read_panel.pos() if self._drag_read_was_visible else None
+            self._drag_ask_start = self.ask_flower_dialog.pos() if self._drag_ask_was_visible else None
             self._drag_ball_start = self.pos()
             self._press_global = e.globalPosition().toPoint()
             self._drag = self._press_global - self.pos()
@@ -1997,7 +2339,7 @@ class ZhujianBall(QWidget):
                 self._moved = True
                 self._cancel_press_for_drag()
             delta = current - self._press_global
-            if self._drag_menu_was_visible or self._drag_read_was_visible:
+            if self._drag_menu_was_visible or self._drag_read_was_visible or self._drag_ask_was_visible:
                 self._sync_dragged_popups(delta)
             else:
                 self.move(current - self._drag)
@@ -2021,8 +2363,10 @@ class ZhujianBall(QWidget):
             self._press_global = None
             self._drag_menu_was_visible = False
             self._drag_read_was_visible = False
+            self._drag_ask_was_visible = False
             self._drag_menu_start = None
             self._drag_read_start = None
+            self._drag_ask_start = None
             self._drag_ball_start = None
         elif e.button() == Qt.MouseButton.RightButton:
             self._toggle_context_menu(e.globalPosition().toPoint())
@@ -2036,35 +2380,38 @@ class ZhujianBall(QWidget):
             self._open_context_menu(global_pos)
 
     def _sync_dragged_popups(self, desired_delta=None):
-        """球被单独拖动时，让已打开的面板保持用户当前的相对位置。"""
+        """球被单独拖动时，让所有已打开的弹窗保持用户当前的相对位置。
+        可同时带多个：左键面板 / 朗读窗 / 问问小花弹窗。"""
         if self._drag_ball_start is None:
             return
-        popup = None
-        popup_start = None
+        popups = []
         if self._drag_read_was_visible and self.read_panel is not None:
-            popup = self.read_panel
-            popup_start = self._drag_read_start
-        elif self._drag_menu_was_visible and self.menu is not None:
-            popup = self.menu
-            popup_start = self._drag_menu_start
-        if popup is None or popup_start is None:
+            popups.append((self.read_panel, self._drag_read_start))
+        if self._drag_menu_was_visible and self.menu is not None:
+            popups.append((self.menu, self._drag_menu_start))
+        if self._drag_ask_was_visible and self.ask_flower_dialog is not None:
+            popups.append((self.ask_flower_dialog, self._drag_ask_start))
+        if not popups:
             return
         delta = desired_delta if desired_delta is not None else self.pos() - self._drag_ball_start
         screen = self.screen() or QApplication.primaryScreen()
         geo = screen.availableGeometry()
-        dx, dy = clamp_pair_drag(
-            delta.x(), delta.y(),
-            (self._drag_ball_start.x(), self._drag_ball_start.y(), self.width(), self.height()),
-            (popup_start.x(), popup_start.y(), popup.width(), popup.height()),
-            (geo.left(), geo.top(), geo.right() + 1, geo.bottom() + 1),
-        )
-        self.move(self._drag_ball_start + QPoint(dx, dy))
-        # 球带着面板移动也算用户手动调整；延迟布局回调不能再按左优先规则把面板拽走。
-        popup._user_dragged = True
-        popup.move(popup_start + QPoint(dx, dy))
-        if not popup.isVisible():
-            popup.show()
-            popup.raise_()
+        for popup, popup_start in popups:
+            if popup_start is None:
+                continue
+            dx, dy = clamp_pair_drag(
+                delta.x(), delta.y(),
+                (self._drag_ball_start.x(), self._drag_ball_start.y(), self.width(), self.height()),
+                (popup_start.x(), popup_start.y(), popup.width(), popup.height()),
+                (geo.left(), geo.top(), geo.right() + 1, geo.bottom() + 1),
+            )
+            self.move(self._drag_ball_start + QPoint(dx, dy))
+            # 球带着弹窗移动也算用户手动调整；延迟布局回调不能再按左优先规则把弹窗拽走。
+            popup._user_dragged = True
+            popup.move(popup_start + QPoint(dx, dy))
+            if not popup.isVisible():
+                popup.show()
+                popup.raise_()
 
     # ── 贴边吸附 ──
     def _snap(self):
@@ -2096,6 +2443,9 @@ class ZhujianBall(QWidget):
         if self.read_panel is not None and self.read_panel.isVisible():
             self.read_panel.close()
             return
+        # 主面板没开，但问问小花弹窗开着：先收掉它，再正常展开主面板
+        if self.ask_flower_dialog is not None and self.ask_flower_dialog.isVisible():
+            self.ask_flower_dialog.close()
         self._open_menu()
 
     def _close_menu(self):
@@ -2427,6 +2777,30 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
         self.btn_say.clicked.connect(self._open_read_panel)
         say_row.addWidget(self.btn_say)
         root.addWidget(self.say_tool)
+
+        # 问问小花：问 Hana 用法，发到当前会话由助手加载内置说明书 skill 回答
+        self.ask_flower_tool = QFrame()
+        self.ask_flower_tool.setObjectName("toolRow")
+        ask_flower_row = QHBoxLayout(self.ask_flower_tool)
+        ask_flower_row.setContentsMargins(10, 8, 10, 8)
+        ask_flower_row.setSpacing(10)
+        ask_flower_copy = QVBoxLayout()
+        ask_flower_copy.setSpacing(2)
+        self.lbl_ask_flower_title = QLabel("问问小花")
+        self.lbl_ask_flower_title.setObjectName("toolTitle")
+        ask_flower_copy.addWidget(self.lbl_ask_flower_title)
+        self.lbl_ask_flower_desc = QLabel("想问 Hana 的用法？点这里问问小花就行哈")
+        self.lbl_ask_flower_desc.setObjectName("toolDesc")
+        self.lbl_ask_flower_desc.setWordWrap(True)
+        ask_flower_copy.addWidget(self.lbl_ask_flower_desc)
+        ask_flower_row.addLayout(ask_flower_copy, 1)
+        self.btn_ask_flower = QPushButton("问问小花")
+        self.btn_ask_flower.setObjectName("sayBtn")
+        self.btn_ask_flower.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_ask_flower.setToolTip("打开提问弹窗，问 Hana 用法，小花用说明书在这里答你")
+        self.btn_ask_flower.clicked.connect(self._open_ask_flower)
+        ask_flower_row.addWidget(self.btn_ask_flower)
+        root.addWidget(self.ask_flower_tool)
 
         self.rename_tool = QFrame()
         self.rename_tool.setObjectName("toolRow")
@@ -3028,7 +3402,8 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
 
     def _set_resume_mode(self, active):
         if active:
-            self.lbl_head.setText("🌸 窗口断联了")
+            is_stuck = (self._resume_entry or {}).get("source") == "stuck_turn"
+            self.lbl_head.setText("🌸 窗口卡住了" if is_stuck else "🌸 窗口断联了")
             self.setMinimumHeight(0)
             for widget in (
                 self.lbl_target_label, self.btn_target, self.lbl_target_info,
@@ -3069,7 +3444,6 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
         self.lbl_resume_reason.setText(str(resume.get("reason") or "窗口断联了"))
         self.btn_resume_continue.setEnabled(True)
         self.btn_resume_continue.setText("继续")
-
     def _continue_resume(self):
         if not self.is_resume_open() or self._resume_responding:
             return
@@ -3246,6 +3620,14 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
         self.close_menu()                       # 推荐面板让位，不再自带朗读按钮
         self.ball.read_panel.open_for(self.ball.target_name, start=False)
         self.ball._set_fusion_panel_state("read")
+
+    def _open_ask_flower(self):
+        """点「问问小花」：收起推荐面板，弹提问窗，用解语花自己配置的模型直接回答。"""
+        if self.ball.ask_flower_dialog is None:
+            self.ball.ask_flower_dialog = AskFlowerDialog(self.ball)
+        self.close_menu()
+        self.ball.ask_flower_dialog.show_near_ball()
+        self.ball._set_fusion_panel_state("ask")
 
     def _update_say_btn(self):
         """让朗读工具的说明跟随当前判定的助手名，按钮本身保持统一动作文案。"""
