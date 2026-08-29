@@ -1,11 +1,13 @@
 ---
 name: jiegehua-hana-guide
-description: "HanaAgent 用户说明书（内嵌版）。解答用户关于 HanaAgent 使用方法、功能介绍、常见问题和实用技巧的疑问。MANDATORY TRIGGERS: 怎么用, 使用方法, 说明书, 帮助文档, 新手指南, 怎么设置, 功能介绍, how to use, user guide, help, getting started, 教程, tutorial, 这是什么功能, 怎么操作, Hana怎么, Hana如何, Hana是什么, 归档, 删除会话, 怎么删会话, 怎么归档, 侧边栏, 会话管理, 模型设置, 供应商, 记忆, 书桌, 工作台, 技能, 插件, 连接器, MCP, 自动化, 定时任务, 巡检, Bridge, 社交平台, Owner, 访客, 远程, 手机, 局域网, 安全, 沙箱, 备份, 恢复"
+description: "HanaAgent 使用说明（快捷版，基于 Hana 内置 user-guide skill 整理）。解答用户关于 HanaAgent 使用方法、功能介绍、常见问题和实用技巧的疑问。MANDATORY TRIGGERS: 怎么用, 使用方法, 说明书, 帮助文档, 新手指南, 怎么设置, 功能介绍, how to use, user guide, help, getting started, 教程, tutorial, 这是什么功能, 怎么操作, Hana怎么, Hana如何, Hana是什么, 归档, 删除会话, 怎么删会话, 怎么归档, 侧边栏, 会话管理, 模型设置, 供应商, 记忆, 书桌, 工作台, 技能, 插件, 连接器, MCP, 自动化, 定时任务, 巡检, Bridge, 社交平台, Owner, 访客, 远程, 手机, 局域网, 安全, 沙箱, 备份, 恢复"
 default-enabled: true
 ---
 
-# HanaAgent 用户说明书（内嵌版）
+# HanaAgent 使用说明（快捷版）
 
+> **来源说明**：本文档内容基于 **HanaAgent 内置的 user-guide skill**（由 HanaAgent 官方随应用提供）整理搬运，保留原版功能说明，仅调整了呈现方式。完整版使用说明在 HanaAgent 设置或官方文档中可以找到，本文档是悬浮球里的快捷入口，方便你随手查。
+>
 > 面向普通用户的使用指南。当用户问到「怎么用」「这个功能是什么」「怎么设置」等问题时，参考本文档回答。
 > 回答时用通俗语言，避免技术术语，必要时举例说明。
 > 本说明书跟随 HanaAgent 公开版功能维护；内测新功能如与公开版冲突，以公开版为准回答。
