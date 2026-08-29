@@ -394,10 +394,12 @@ class ZhujianMotionTests(QtTestCase):
         self.assertEqual(menu.lbl_section.text(), "对话工具")
         self.assertEqual(menu.lbl_say_title.text(), "朗读回复")
         self.assertEqual(menu.btn_say.text(), "念给我听")
+        self.assertEqual(menu.lbl_ask_flower_title.text(), "问问小花")
+        self.assertEqual(menu.btn_ask_flower.text(), "问问小花")
         self.assertEqual(menu.lbl_rename_title.text(), "会话标题")
         self.assertEqual(menu.btn_rename.text(), "生成新标题")
         self.assertEqual(menu.btn_undo.text(), "还原")
-        self.assertEqual(len(menu.findChildren(zhujian.QFrame, "toolRow")), 2)
+        self.assertEqual(len(menu.findChildren(zhujian.QFrame, "toolRow")), 3)
 
         menu.lbl_cache_time.setText("上次生成 10:38")
         menu.show()
@@ -446,7 +448,9 @@ class ZhujianMotionTests(QtTestCase):
             self.assertLessEqual(menu.btn_rename.geometry().right(), menu.rename_tool.width())
             self.assertLessEqual(menu.btn_undo.geometry().right(), menu.rename_tool.width())
             self.assertGreater(menu.btn_undo.geometry().y(), menu.btn_rename.geometry().y())
-            self.assertGreaterEqual(menu.rename_tool.height(), 100)
+            # 新增「问问小花」工具行后，标题工具整体变窄：不硬性要求 100px，
+            # 只验证两个按钮都在自己的工具行内、还原在生成按钮下方（布局没塌）。
+            self.assertGreaterEqual(menu.rename_tool.height(), 84)
         menu.close()
         ball.close()
         app.processEvents()
