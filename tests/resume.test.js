@@ -9,6 +9,7 @@ import path from "node:path";
 
 import {
   ResumeTurnTracker,
+  StuckTurnTracker,
   buildResumeCard,
   buildResumeReason,
   isFinalTurn,
@@ -469,4 +470,108 @@ test("sendResumeContinue：本地文件检查不再是门禁，指向不存在�
   assert.equal(result.ok, true, "发送交给宿主 session:send 裁决，不做本地 fs.existsSync 硬门禁");
   assert.equal(result.notFound, undefined);
   assert.equal(listResumePending(dir).length, 0);
+});
+
+// ─── 思考卡死检测（stuck turn · 2026-08-29） ───
+
+test("StuckTurnTracker：turn_start 起心跳，超时触发 onAlert(source=stuck_turn)", async () => {
+  let alerted = null;
+  const tracker = new StuckTurnTracker({
+    onAlert: (a) => { alerted = a; },
+    timeoutMs: 10,
+  });
+  tracker.onTurnStart("s1");
+  await new Promise((r) => setTimeout(r, 30));
+  assert.ok(alerted);
+  assert.equal(alerted.sessionId, "s1");
+  assert.equal(alerted.source, "stuck_turn");
+  tracker.dispose();
+});
+
+test("StuckTurnTracker：onActivity（message_end/turn_end）取消心跳，不误报", async () => {
+  let alerted = null;
+  const tracker = new StuckTurnTracker({
+    onAlert: (a) => { alerted = a; },
+    timeoutMs: 10,
+  });
+  tracker.onTurnStart("s1");
+  tracker.onActivity("s1"); // 回合在健康推进
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(alerted, null, "有收尾事件不应判停滞");
+  tracker.dispose();
+});
+
+test("StuckTurnTracker：同会话提醒后有冷却，冷却内不重复弹", async () => {
+  let count = 0;
+  const tracker = new StuckTurnTracker({
+    onAlert: () => { count++; },
+    timeoutMs: 5,
+  });
+  tracker.onTurnStart("s1");
+  await new Promise((r) => setTimeout(r, 15));
+  assert.equal(count, 1);
+  tracker.onTurnStart("s1"); // 冷却内再次 turn_start，不重复起心跳
+  await new Promise((r) => setTimeout(r, 15));
+  assert.equal(count, 1, "冷却内不应重复提醒");
+  tracker.dispose();
+});
+
+test("StuckTurnTracker：flush 立即触发（测试入口）", () => {
+  let alerted = null;
+  const tracker = new StuckTurnTracker({
+    onAlert: (a) => { alerted = a; },
+    timeoutMs: 10000,
+  });
+  tracker.onTurnStart("s1");
+  const fired = tracker.flush("s1");
+  assert.equal(fired, true);
+  assert.equal(alerted.source, "stuck_turn");
+  tracker.dispose();
+});
+
+test("buildResumeReason：source=stuck_turn 返回停滞文案", () => {
+  assert.equal(
+    buildResumeReason("", { source: "stuck_turn" }),
+    "窗口卡在思考里了，半天没吐一个字",
+  );
+  assert.equal(buildResumeReason("timeout", { source: "stuck_turn" }), "窗口卡在思考里了，半天没吐一个字");
+  assert.equal(buildResumeReason("timeout"), "等太久了没等到回复");
+});
+
+test("buildResumeCard：stuck_turn 标题与文案区分", () => {
+  const stuck = buildResumeCard({ agentName: "小花", sessionTitle: "插件闲聊", source: "stuck_turn" });
+  assert.equal(stuck.title, "🌸 窗口卡住了");
+  assert.ok(stuck.body.includes("小花 · 插件闲聊"));
+  assert.ok(stuck.body.includes("让它接上话头"));
+  const normal = buildResumeCard({ agentName: "小花", reason: "网络连接断了" });
+  assert.equal(normal.title, "🌸 窗口断联了");
+});
+
+test("createResumePending：source=stuck_turn 写入并透传", async () => {
+  const dir = tmpDir();
+  const { resumeId, entry } = await createResumePending(dir, {
+    agentId: "hanako",
+    sessionId: "s1",
+    sessionPath: "C:\\agents\\hanako\\sessions\\s1.jsonl",
+    reason: "窗口卡在思考里了，半天没吐一个字",
+    source: "stuck_turn",
+  });
+  assert.equal(entry.source, "stuck_turn");
+  const list = listResumePending(dir);
+  assert.equal(list.length, 1);
+  assert.equal(list[0].source, "stuck_turn");
+  assert.equal(list[0].reason, "窗口卡在思考里了，半天没吐一个字");
+  assert.equal(list[0].resumeId, resumeId);
+});
+
+test("createResumePending：普通断联不带 source，归一化后为空串", async () => {
+  const dir = tmpDir();
+  const { entry } = await createResumePending(dir, {
+    agentId: "hanako",
+    sessionId: "s2",
+    sessionPath: "C:\\agents\\hanako\\sessions\\s2.jsonl",
+    reason: "网络连接断了",
+  });
+  assert.equal(entry.source, "");
+  assert.equal(listResumePending(dir)[0].source, "");
 });

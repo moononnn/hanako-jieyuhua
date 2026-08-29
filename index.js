@@ -28,6 +28,7 @@ import {
 import { getStorageMode, protectKey, unprotectKey } from "./lib/crypto.js";
 import {
   ResumeTurnTracker,
+  StuckTurnTracker,
   RESUME_AUTO_DELAY_MS,
   buildResumeReason,
   isFinalTurn,
@@ -125,6 +126,13 @@ export default class Plugin {
         ctx.log?.error?.("[解语花] 断联待办创建失败", { error: error?.message || String(error) });
       }),
     });
+    // 思考卡死检测（2026-08-29）：turn_start 后 90 秒无任何收尾事件 → 判停滞，弹「继续」卡。
+    // 与 ResumeTurnTracker 互补：那边管有事件可依的失败，这边管无事件的静默断流。
+    this._stuckTracker = new StuckTurnTracker({
+      onAlert: (alert) => this._handleResumeAlert(alert).catch((error) => {
+        ctx.log?.error?.("[解语花] 停滞待办创建失败", { error: error?.message || String(error) });
+      }),
+    });
     try {
       this._offResumeEvents = ctx.bus.subscribe((event, scopedSessionPath) => {
         try {
@@ -151,11 +159,31 @@ export default class Plugin {
       if (!sid) return;
       this._lastUserMsgAt.set(sid, Date.now());
       this._resumeTracker.beginUserTurn(sid);
+      // 用户自己发新消息 = 回合有活人接手：停滞心跳取消，断联待办清掉
+      this._stuckTracker.onActivity(sid);
       const selfSent = this._recentResumeSends.get(sid);
       if (selfSent && Date.now() - selfSent < 2000) return; // 自己发的「继续」，不算用户接手
       this._recentResumeSends.delete(sid);
       resetResumeConsecutive(this._dataDir, sid);
       dismissResumeBySession(this._dataDir, sid);
+      return;
+    }
+    // 1b) 回合真正开始生成（turn_start）：起停滞心跳。带 sessionPath 才认。
+    if (type === "turn_start") {
+      const sid = sessionIdFromPath(sessionPath);
+      if (!sid) return;
+      if (this._lastUserMsgAt.has(sid)) {
+        this._stuckTracker.onTurnStart(sid);
+        dbgResume(`[停滞] turn_start session=${sid} 心跳已起`);
+      }
+      return;
+    }
+    // 1c) 单条消息完成（message_end，含工具循环中间输出）：回合在健康推进，取消心跳。
+    // 注意：message_end 每轮工具循环都会发，不是回合结束信号；真正结束看 turn_end。
+    if (type === "message_end") {
+      const sid = sessionIdFromPath(sessionPath);
+      if (!sid) return;
+      this._stuckTracker.onActivity(sid);
       return;
     }
     if (type !== "turn_end" && type !== "error" && type !== "session_status"
@@ -175,9 +203,16 @@ export default class Plugin {
         resetResumeConsecutive(this._dataDir, retryEnd.sessionId);
         dismissResumeBySession(this._dataDir, retryEnd.sessionId);
       }
+      // 无论成败，自动重试结束后回合不再悬空：取消停滞心跳
+      this._stuckTracker.onActivity(retryEnd.sessionId);
       return;
     }
     const sid = sessionIdFromPath(sessionPath);
+    // 2b) session_status isStreaming=false：流结束（可能回合完成，也可能是异常释放）。
+    // 取消停滞心跳；aborted 分支由下方 parseSessionAbortResume 处理断联待办。
+    if (type === "session_status" && event.isStreaming === false && sid) {
+      this._stuckTracker.onActivity(sid);
+    }
     const isActive = Boolean(sid) && this._lastUserMsgAt.has(sid);
     // 3) provider 错误 / 会话被强制释放：记失败候选
     if (isActive) {
@@ -212,6 +247,7 @@ export default class Plugin {
     if (isFinalTurn(info.stopReason) && !info.aborted && info.stopReason !== "error") {
       // 正常最终回合：会话恢复健康
       if (isActive) this._resumeTracker.onTurnSuccess(info.sessionId);
+      this._stuckTracker.onActivity(info.sessionId);
       resetResumeConsecutive(this._dataDir, info.sessionId);
       dismissResumeBySession(this._dataDir, info.sessionId);
       dbgResume(`[健康] 正常回合完成 session=${info.sessionId}`);
@@ -230,9 +266,11 @@ export default class Plugin {
     const cfg = getConfig(this._dataDir);
     if (!cfg.resume?.enabled || cfg.presentation !== "ball") return;
 
+    const source = alert?.source === "stuck_turn" ? "stuck_turn" : "";
     const reason = buildResumeReason(alert.errorMessage, {
       aborted: alert.aborted === true,
       reason: alert.reason,
+      source,
     });
     await bumpResumeConsecutive(this._dataDir, sessionId);
 
@@ -255,8 +293,9 @@ export default class Plugin {
       sessionId,
       sessionPath,
       reason,
+      source,
     });
-    dbgResume(`[登记] 断联待办 session=${sessionId} reason=${reason}`);
+    dbgResume(`[登记] 断联待办 session=${sessionId} reason=${reason} source=${source || "turn_failure"}`);
     this.ctx.log?.info?.("[解语花] 断联已登记", { sessionId, agentId, reason });
   }
 
@@ -299,6 +338,7 @@ export default class Plugin {
       for (const timer of this._resumeTimers?.values() || []) clearTimeout(timer);
       this._resumeTimers?.clear();
       this._resumeTracker?.dispose();
+      this._stuckTracker?.dispose();
       if (typeof this._offResumeEvents === "function") this._offResumeEvents();
     } catch (error) {
       this.ctx.log?.warn?.("解语花断联检测清理失败", { error: error?.message || String(error) });

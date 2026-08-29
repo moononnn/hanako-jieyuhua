@@ -116,6 +116,18 @@ class ResumeCardTests(QtTestCase):
             ball.close()
             app.processEvents()
 
+    def test_stuck_turn_resume_renders_card_head(self):
+        app, ball, panel = self._make_panel()
+        try:
+            panel.show_resume(self._resume_entry(source="stuck_turn", reason="窗口卡在思考里了，半天没吐一个字"))
+            self.assertTrue(panel.is_resume_open())
+            self.assertIn("窗口卡住了", panel.lbl_head.text())
+            self.assertIn("窗口卡在思考里了", panel.lbl_resume_reason.text())
+        finally:
+            panel.close()
+            ball.close()
+            app.processEvents()
+
     def test_no_title_falls_back_to_agent(self):
         app, ball, panel = self._make_panel()
         try:
