@@ -7,6 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { getConfig, setConfig, updateTtsConfig, loadData, getPending, withDataLock, normalizeStyles, DEFAULT_CONFIG, saveData } from "../lib/data.js";
 import { getAvailableModels, generateSuggestions, parseSuggestions, redactSecrets, validateBaseUrl, callLLM } from "../lib/llm.js";
+import { extractModelText, callConfiguredTextModel } from "../lib/text-model.js";
 import { protectKey, maskKey, getStorageMode } from "../lib/crypto.js";
 import { compareVersions } from "../lib/version.js";
 import { listAgents } from "../lib/session.js";
@@ -135,8 +136,8 @@ export default function registerPluginApiRoutes(app, ctx) {
       let raw;
       if (source === "agent") {
         const sampleFn = (opts) => ctx.model?.sample ? ctx.model.sample(opts) : Promise.reject(new Error("当前会话模型不可用"));
-        const response = await sampleFn({ messages: [{ role: "user", content: prompt }], maxTokens: 1500, temperature: 0.9 });
-        raw = typeof response === "string" ? response : (response?.text ?? response?.content ?? "");
+        const response = await sampleFn({ messages: [{ role: "user", content: prompt }], maxTokens: 1500, temperature: 0.5, reasoningLevel: "off" });
+        raw = extractModelText(response).text;
       } else if (source === "custom") {
         const baseUrl = String(m.custom?.baseUrl || "").trim();
         const submittedKey = String(m.custom?.apiKey || "").trim();
@@ -158,13 +159,15 @@ export default function registerPluginApiRoutes(app, ctx) {
         if (!ctx.bus || typeof ctx.bus.request !== "function") {
           return json({ ok: false, error: "当前 Hana 没有可用的模型通道" });
         }
-        const result = await ctx.bus.request("utility:call-text", {
-          messages: [{ role: "user", content: prompt }],
-          providerId: m.providerId,
-          modelId: m.modelId,
-          operation: "jiegehua-model-test",
-        }, { timeoutMs: 30000 });
-        raw = extractModelText(result);
+        raw = await callConfiguredTextModel({
+          bus: ctx.bus,
+          fetcher: ctx.network?.fetch ? ctx.network.fetch.bind(ctx.network) : undefined,
+        }, m.providerId, m.modelId, [{ role: "user", content: prompt }], {
+          maxTokens: 1500,
+          temperature: 0.5,
+          reasoningLevel: "off",
+          timeoutMs: 30000,
+        });
       }
 
       const items = parseSuggestions(raw, count);
@@ -561,15 +564,6 @@ export default function registerPluginApiRoutes(app, ctx) {
     const deps = await checkZhujianDeps();
     return json({ ok: true, running: st.running, dismissed, pyQtOk: !!deps.pyQtOk });
   });
-}
-
-function extractModelText(result) {
-  if (typeof result === "string") return result;
-  const value = result?.text ?? result?.content ?? result?.output ?? "";
-  if (Array.isArray(value)) {
-    return value.map((part) => typeof part === "string" ? part : (part?.text || part?.content || "")).join("");
-  }
-  return String(value || "");
 }
 
 function testPrompt(count) {

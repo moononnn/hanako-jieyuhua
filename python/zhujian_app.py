@@ -43,7 +43,7 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtWidgets import (
-    QApplication, QWidget, QPushButton, QLabel, QFrame, QLineEdit, QScrollArea,
+    QApplication, QWidget, QPushButton, QLabel, QFrame, QLineEdit, QPlainTextEdit, QScrollArea,
     QVBoxLayout, QHBoxLayout, QGridLayout, QSizePolicy,
 )
 
@@ -1600,13 +1600,16 @@ class ZhujianBall(QWidget):
         self._drag_menu_was_visible = False
         self._drag_read_was_visible = False
         self._drag_ask_was_visible = False
+        self._drag_polish_was_visible = False
         self._drag_menu_start = None
         self._drag_read_start = None
         self._drag_ask_start = None
+        self._drag_polish_start = None
         self._drag_ball_start = None
         self.menu = None
         self.read_panel = None        # 独立朗读窗口（由主面板「念给我听」打开）
         self.ask_flower_dialog = None  # 「问问小花」输入弹窗（右键浮签打开，懒创建）
+        self.polish_panel = None      # 「帮我捋捋」弹窗（由主面板「捋一捋」打开，二级）
         self._ask_poll_inflight = False
         self.ask_ready.connect(self._apply_ask_payload)
         # 右键浮签不再是 Popup（Popup 会抢在 toggle 前自动关闭，无法实现"再按一次右键收起"），
@@ -1713,11 +1716,13 @@ class ZhujianBall(QWidget):
                 return
             if not self.menu.isVisible():
                 # 已经在提问态时只重新显示原面板，不能先 prepare_for_show 把提问替换成推荐。
-                # 互斥：自动弹面板前也先收右键浮签与朗读窗口，保证不并存
+                # 互斥：自动弹面板前也先收右键浮签、朗读窗与润色窗，保证不并存
                 if self.context_menu is not None:
                     self.context_menu.close()
                 if self.read_panel is not None and self.read_panel.isVisible():
                     self.read_panel.close()
+                if self.polish_panel is not None and self.polish_panel.isVisible():
+                    self.polish_panel.close()
                 if not self.menu.is_ask_open():
                     self.menu.prepare_for_show()
                 self.menu.move_to_ball()
@@ -1749,11 +1754,13 @@ class ZhujianBall(QWidget):
                 and resume.get("resumeId") == self.menu._resume_entry.get("resumeId")
             )
             if not self.menu.isVisible():
-                # 互斥：自动弹卡片前也先收右键浮签与朗读窗口，保证不并存
+                # 互斥：自动弹卡片前也先收右键浮签、朗读窗与润色窗，保证不并存
                 if self.context_menu is not None:
                     self.context_menu.close()
                 if self.read_panel is not None and self.read_panel.isVisible():
                     self.read_panel.close()
+                if self.polish_panel is not None and self.polish_panel.isVisible():
+                    self.polish_panel.close()
                 if not self.menu.is_ask_open() and not self.menu.is_resume_open():
                     self.menu.prepare_for_show()
                 self.menu.move_to_ball()
@@ -1800,6 +1807,9 @@ class ZhujianBall(QWidget):
         if self.read_panel is not None:
             self.read_panel.apply_theme()
             self.read_panel.update()
+        if self.polish_panel is not None:
+            self.polish_panel.apply_theme()
+            self.polish_panel.update()
 
     # ── SVG 渲染 ──
     def _render_svg_to_pixmap(self, name, size):
@@ -1850,7 +1860,7 @@ class ZhujianBall(QWidget):
         save_state(self.state)
 
     def _set_fusion_panel_state(self, panel):
-        panel = panel if panel in {"none", "menu", "ask", "read"} else "none"
+        panel = panel if panel in {"none", "menu", "ask", "read", "polish"} else "none"
         if self.state.get("fusionPanel") == panel:
             return
         self.state["fusionPanel"] = panel
@@ -2355,6 +2365,12 @@ class ZhujianBall(QWidget):
             self._drag_menu_start = self.menu.pos() if self._drag_menu_was_visible else None
             self._drag_read_start = self.read_panel.pos() if self._drag_read_was_visible else None
             self._drag_ask_start = self.ask_flower_dialog.pos() if self._drag_ask_was_visible else None
+            # 润色弹窗挂在主面板上（同开同关）：球拖时若面板可见就带它，锚点取面板当前位置
+            self._drag_polish_was_visible = bool(
+                self.polish_panel is not None
+                and self.polish_panel.isVisible()
+            )
+            self._drag_polish_start = self.polish_panel.pos() if self._drag_polish_was_visible else None
             self._drag_ball_start = self.pos()
             self._press_global = e.globalPosition().toPoint()
             self._drag = self._press_global - self.pos()
@@ -2373,7 +2389,7 @@ class ZhujianBall(QWidget):
                 self._moved = True
                 self._cancel_press_for_drag()
             delta = current - self._press_global
-            if self._drag_menu_was_visible or self._drag_read_was_visible or self._drag_ask_was_visible:
+            if self._drag_menu_was_visible or self._drag_read_was_visible or self._drag_ask_was_visible or self._drag_polish_was_visible:
                 self._sync_dragged_popups(delta)
             else:
                 self.move(current - self._drag)
@@ -2398,9 +2414,11 @@ class ZhujianBall(QWidget):
             self._drag_menu_was_visible = False
             self._drag_read_was_visible = False
             self._drag_ask_was_visible = False
+            self._drag_polish_was_visible = False
             self._drag_menu_start = None
             self._drag_read_start = None
             self._drag_ask_start = None
+            self._drag_polish_start = None
             self._drag_ball_start = None
         elif e.button() == Qt.MouseButton.RightButton:
             self._toggle_context_menu(e.globalPosition().toPoint())
@@ -2425,6 +2443,8 @@ class ZhujianBall(QWidget):
             popups.append((self.menu, self._drag_menu_start))
         if self._drag_ask_was_visible and self.ask_flower_dialog is not None:
             popups.append((self.ask_flower_dialog, self._drag_ask_start))
+        if self._drag_polish_was_visible and self.polish_panel is not None:
+            popups.append((self.polish_panel, self._drag_polish_start))
         if not popups:
             return
         delta = desired_delta if desired_delta is not None else self.pos() - self._drag_ball_start
@@ -2477,6 +2497,10 @@ class ZhujianBall(QWidget):
         if self.read_panel is not None and self.read_panel.isVisible():
             self.read_panel.close()
             return
+        # 主面板没开，但润色窗开着：点球先收掉它（不展开面板，跟朗读同款）
+        if self.polish_panel is not None and self.polish_panel.isVisible():
+            self.polish_panel.close()
+            return
         # 主面板没开，但问问小花弹窗开着：先收掉它，再正常展开主面板
         if self.ask_flower_dialog is not None and self.ask_flower_dialog.isVisible():
             self.ask_flower_dialog.close()
@@ -2489,10 +2513,12 @@ class ZhujianBall(QWidget):
 
     # ── 右键菜单 ──
     def _open_context_menu(self, global_pos):
-        # 互斥：开右键浮签前先收左键面板与朗读窗口，弹窗永不并存（避免叠放/遮挡干扰 hover）
+        # 互斥：开右键浮签前先收左键面板、朗读窗与润色窗，弹窗永不并存（避免叠放/遮挡干扰 hover）
         self._close_menu()
         if self.read_panel is not None and self.read_panel.isVisible():
             self.read_panel.close()
+        if self.polish_panel is not None and self.polish_panel.isVisible():
+            self.polish_panel.close()
         if self.context_menu is None:
             self.context_menu = SendModeMenu(self)
         self.context_menu.show_at(global_pos)
@@ -2532,6 +2558,8 @@ class ZhujianBall(QWidget):
     def _open_menu(self):
         if self.read_panel is not None and self.read_panel.isVisible():
             self.read_panel.close()
+        if self.polish_panel is not None and self.polish_panel.isVisible():
+            self.polish_panel.close()
         if self.menu is None:
             self.menu = ZhujianMenu(self)
         if not self.menu.is_ask_open():
@@ -2762,17 +2790,17 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
         resume_actions = QHBoxLayout()
         resume_actions.setContentsMargins(0, 0, 0, 0)
         resume_actions.setSpacing(8)
-        self.btn_resume_continue = QPushButton("继续")
+        self.btn_resume_continue = QPushButton("继续哈")
         self.btn_resume_continue.setObjectName("resumeContinue")
         self.btn_resume_continue.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_resume_continue.setToolTip("往这个窗口发一条「继续」，接上话头")
+        self.btn_resume_continue.setToolTip("往这个窗口发一条「继续哈」，接上话头")
         self.btn_resume_continue.clicked.connect(self._continue_resume)
         resume_actions.addWidget(self.btn_resume_continue)
         self.btn_resume_auto = QPushButton("自动续接：关")
         self.btn_resume_auto.setObjectName("resumeAuto")
         self.btn_resume_auto.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_resume_auto.setCheckable(True)
-        self.btn_resume_auto.setToolTip("打开后检测到窗口断联会自动发「继续」，不再弹窗")
+        self.btn_resume_auto.setToolTip("打开后检测到窗口断联会自动发「继续哈」，不再弹窗")
         self.btn_resume_auto.clicked.connect(self._toggle_resume_auto)
         resume_actions.addWidget(self.btn_resume_auto, 0, Qt.AlignmentFlag.AlignRight)
         resume_layout.addLayout(resume_actions)
@@ -2872,6 +2900,30 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
         rename_actions.addWidget(self.btn_undo, 0, Qt.AlignmentFlag.AlignRight)
         rename_row.addLayout(rename_actions)
         root.addWidget(self.rename_tool)
+
+        # 帮我捋捋：把糙话理成 AI 更好理解的样子（独立二级弹窗）
+        self.polish_tool = QFrame()
+        self.polish_tool.setObjectName("toolRow")
+        polish_row = QHBoxLayout(self.polish_tool)
+        polish_row.setContentsMargins(10, 8, 10, 8)
+        polish_row.setSpacing(10)
+        polish_copy = QVBoxLayout()
+        polish_copy.setSpacing(2)
+        self.lbl_polish_title = QLabel("帮我捋捋")
+        self.lbl_polish_title.setObjectName("toolTitle")
+        polish_copy.addWidget(self.lbl_polish_title)
+        self.lbl_polish_desc = QLabel("把随手写的话捋一捋，原意不乱，确认后再发出去")
+        self.lbl_polish_desc.setObjectName("toolDesc")
+        self.lbl_polish_desc.setWordWrap(True)
+        polish_copy.addWidget(self.lbl_polish_desc)
+        polish_row.addLayout(polish_copy, 1)
+        self.btn_polish = QPushButton("捋一捋")
+        self.btn_polish.setObjectName("renameBtn")
+        self.btn_polish.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_polish.setToolTip("打开帮我捋捋：写下糙话 → 捋一捋 → 可改 → 发进当前对话")
+        self.btn_polish.clicked.connect(self._open_polish_panel)
+        polish_row.addWidget(self.btn_polish)
+        root.addWidget(self.polish_tool)
 
         self.lbl_feedback = QLabel("")
         self.lbl_feedback.setObjectName("feedback")
@@ -3125,7 +3177,7 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
             for widget in (
                 self.lbl_target_label, self.btn_target, self.lbl_target_info,
                 self.recommend_body,
-                self.lbl_section, self.say_tool, self.ask_flower_tool, self.rename_tool, self.lbl_hint,
+                self.lbl_section, self.say_tool, self.ask_flower_tool, self.rename_tool, self.polish_tool, self.lbl_hint,
             ):
                 widget.hide()
             self.target_menu.hide()
@@ -3153,7 +3205,7 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
             for widget in (
                 self.lbl_target_label, self.btn_target, self.lbl_target_info,
                 self.recommend_body,
-                self.lbl_section, self.say_tool, self.rename_tool, self.lbl_hint,
+                self.lbl_section, self.say_tool, self.rename_tool, self.polish_tool, self.lbl_hint,
             ):
                 widget.show()
             self.set_ask_flower_enabled(self._ask_flower_enabled)
@@ -3456,7 +3508,7 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
             for widget in (
                 self.lbl_target_label, self.btn_target, self.lbl_target_info,
                 self.recommend_body,
-                self.lbl_section, self.say_tool, self.ask_flower_tool, self.rename_tool, self.lbl_hint,
+                self.lbl_section, self.say_tool, self.ask_flower_tool, self.rename_tool, self.polish_tool, self.lbl_hint,
             ):
                 widget.hide()
             self.target_menu.hide()
@@ -3473,7 +3525,7 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
             for widget in (
                 self.lbl_target_label, self.btn_target, self.lbl_target_info,
                 self.recommend_body,
-                self.lbl_section, self.say_tool, self.rename_tool, self.lbl_hint,
+                self.lbl_section, self.say_tool, self.rename_tool, self.polish_tool, self.lbl_hint,
             ):
                 widget.show()
             self.resume_body.hide()
@@ -3492,7 +3544,7 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
             self.lbl_resume_from.setText("💬 来自某个窗口")
         self.lbl_resume_reason.setText(str(resume.get("reason") or "窗口断联了"))
         self.btn_resume_continue.setEnabled(True)
-        self.btn_resume_continue.setText("继续")
+        self.btn_resume_continue.setText("继续哈")
     def _continue_resume(self):
         if not self.is_resume_open() or self._resume_responding:
             return
@@ -3533,10 +3585,10 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
         self._resume_responding = False
         if not payload.get("ok"):
             self.btn_resume_continue.setEnabled(True)
-            self.btn_resume_continue.setText("继续")
+            self.btn_resume_continue.setText("继续哈")
             self.lbl_resume_reason.setText(f"发送失败：{payload.get('error') or '再试一次'}")
             return
-        self._flash("已发送 · 继续")
+        self._flash("已发送 · 继续哈")
         self._resume_finished = True
         # 已让窗口继续：短暂反馈后收起回悬浮球（下一轮轮询也收不到这条了）
         QTimer.singleShot(650, self.finish_resume_and_collapse)
@@ -3578,7 +3630,7 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
         title = str(notice.get("title") or "").strip()
         agent = str(notice.get("agentName") or "").strip()
         who = title or agent or "某个窗口"
-        self.lbl_resume_notice.setText(f"✿ 已自动让「{who}」继续")
+        self.lbl_resume_notice.setText(f"✿ 已自动发送「继续哈」给「{who}」")
         self.lbl_resume_notice.show()
         if self._resume_notice_timer is not None:
             self._resume_notice_timer.stop()
@@ -3679,6 +3731,14 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
         self.close_menu()
         self.ball.ask_flower_dialog.show_near_ball()
         self.ball._set_fusion_panel_state("ask")
+
+    def _open_polish_panel(self):
+        """点「捋一捋」：主面板让位（跟朗读同款），只留帮我捋捋弹窗独立展示。"""
+        if self.ball.polish_panel is None:
+            self.ball.polish_panel = PolishPanel(self.ball)
+        self.close_menu()                       # 推荐面板让位，不再自带润色按钮
+        self.ball.polish_panel.open_near_ball()
+        self.ball._set_fusion_panel_state("polish")
 
     def _update_say_btn(self):
         """让朗读工具的说明跟随当前判定的助手名，按钮本身保持统一动作文案。"""
@@ -4101,6 +4161,9 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
             self._dismiss_resume_async(self._resume_entry.get("resumeId") or "")
         if self.target_menu is not None:
             self.target_menu.hide()
+        # 润色弹窗是主面板的二级窗：面板收起时一并收起（下次点开是干净状态）
+        if self.ball.polish_panel is not None and self.ball.polish_panel.isVisible():
+            self.ball.polish_panel.close()
         self.hide()
 
     def _dismiss_resume_async(self, resume_id):
@@ -4139,6 +4202,11 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
             self._drag_panel_start = self.pos()
             self._drag_ball_start = self.ball.pos()
             self._drag_moved = False
+            self._drag_polish_start = (
+                self.ball.polish_panel.pos()
+                if self.ball.polish_panel is not None and self.ball.polish_panel.isVisible()
+                else None
+            )
             reset_motion = getattr(self.ball, "_reset_drag_motion", None)
             if callable(reset_motion):
                 reset_motion()
@@ -4163,6 +4231,10 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
             )
             self.move(self._drag_panel_start + QPoint(dx, dy))
             self.ball.move(self._drag_ball_start + QPoint(dx, dy))
+            # 润色弹窗开着时跟随主面板一起动，保持相对位置
+            if self._drag_polish_start is not None and self.ball.polish_panel is not None:
+                self.ball.polish_panel.move(self._drag_polish_start + QPoint(dx, dy))
+                self.ball.polish_panel._user_dragged = True
             record_motion = getattr(self.ball, "_record_drag_motion", None)
             if callable(record_motion):
                 record_motion()
@@ -4179,6 +4251,7 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
             self._drag_panel_start = None
             self._drag_ball_start = None
             self._drag_moved = False
+            self._drag_polish_start = None
         super().mouseReleaseEvent(e)
 
     def paintEvent(self, event):
@@ -5189,6 +5262,635 @@ class ReadPanel(QFrame):
         painter.setBrush(QColor(c["panel"]))
         painter.drawRoundedRect(self.rect().adjusted(4, 3, -4, -6), 20, 20)
         painter.end()
+
+
+# ─────────────────────────────
+#  帮我捋捋弹窗（主面板「帮我捋捋」打开）
+# ─────────────────────────────
+class PolishPanel(FadeOnLeaveMixin, QFrame):
+    """把随手写的、口语化的提示词捋成 AI 更好理解的样子。
+    输入 → 选力度 → 捋一捋 → 结果回填可改 → 发送进当前对话。
+    发送成功自动收起；与朗读弹窗同款独立二级弹窗。"""
+
+    polish_ready = pyqtSignal(object)     # /polish 回包
+    send_ready = pyqtSignal(object)       # /polish/send 回包
+    target_ready = pyqtSignal(object)     # /target 回包
+
+    WIDTH = 344
+    POLISH_LEVELS = [
+        ("standard", "标准"),
+        ("deep", "深度"),
+    ]
+    POLISH_LEVEL_TIPS = {
+        "standard": "把话顺清楚，只补几乎不会猜错的直接信息",
+        "deep": "把原文已有的要求整理得更清楚，不替你猜事实或做决定",
+    }
+
+    def __init__(self, ball):
+        super().__init__(None)
+        self.ball = ball
+        self.side = str((getattr(self.ball, "state", None) or {}).get("panel_side") or "left")
+        self._drag_press = None
+        self._drag_panel_start = None
+        self._drag_ball_start = None
+        self._drag_moved = False
+        self._user_dragged = False
+        self._level = "standard"
+        self._polishing = False
+        self._sending = False
+        self._closed = False
+        self._request_seq = 0
+        self._target_seq = 0
+        self._target_synced_once = False
+
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+            | Qt.WindowType.NoDropShadowWindowHint
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setObjectName("polishPanel")
+        self.setFixedWidth(self.WIDTH)
+
+        self.polish_ready.connect(self._apply_polish_result)
+        self.send_ready.connect(self._apply_send_result)
+        self.target_ready.connect(self._apply_target_state)
+        self._build_ui()
+        self.apply_theme()
+        self.setup_fade_on_leave()
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(18, 14, 18, 14)
+        root.setSpacing(9)
+
+        # 头部：标题 + 关闭
+        head = QHBoxLayout()
+        head.setSpacing(8)
+        self.lbl_head = QLabel("✨ 帮我捋捋")
+        self.lbl_head.setObjectName("polishHead")
+        head.addWidget(self.lbl_head)
+        head.addStretch(1)
+        self.btn_close = QPushButton("✕")
+        self.btn_close.setObjectName("polishCloseBtn")
+        self.btn_close.setFixedSize(24, 24)
+        self.btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_close.setToolTip("收起小窗")
+        self.btn_close.clicked.connect(self.close)
+        head.addWidget(self.btn_close)
+        root.addLayout(head)
+
+        self.lbl_desc = QLabel("把随手写的话捋一捋，原意不乱，结果可以再改。")
+        self.lbl_desc.setObjectName("polishDesc")
+        self.lbl_desc.setWordWrap(True)
+        root.addWidget(self.lbl_desc)
+
+        # 发送到：哪个对话（跟随最近 / 自己固定一段；与朗读/主面板共用同一套目标）
+        target_row = QHBoxLayout()
+        target_row.setSpacing(6)
+        self.lbl_target_label = QLabel("发送到")
+        self.lbl_target_label.setObjectName("polishTargetLabel")
+        target_row.addWidget(self.lbl_target_label)
+        self.btn_target = QPushButton("跟随最近 ▾")
+        self.btn_target.setObjectName("polishTargetBtn")
+        self.btn_target.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_target.setToolTip("捋好后发进哪段对话：默认跟随最近活跃，也可自己固定一段")
+        self.btn_target.clicked.connect(self._open_target_menu)
+        target_row.addWidget(self.btn_target)
+        target_row.addStretch(1)
+        root.addLayout(target_row)
+
+        self.lbl_target_info = QLabel("")
+        self.lbl_target_info.setObjectName("polishTargetInfo")
+        self.lbl_target_info.setWordWrap(True)
+        root.addWidget(self.lbl_target_info)
+
+        self.target_menu = TargetMenu(self)
+        self.target_menu.hide()
+        root.addWidget(self.target_menu)
+
+        # 力度档位：标准 / 深度
+        level_row = QHBoxLayout()
+        level_row.setSpacing(6)
+        self.lbl_level_label = QLabel("力度")
+        self.lbl_level_label.setObjectName("polishLevelLabel")
+        level_row.addWidget(self.lbl_level_label)
+        self.level_btns = []
+        for key, label in self.POLISH_LEVELS:
+            btn = QPushButton(label)
+            btn.setObjectName("polishLevelBtn")
+            btn.setCheckable(True)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setProperty("level", key)
+            btn.setToolTip(self.POLISH_LEVEL_TIPS.get(key, ""))
+            btn.clicked.connect(lambda _=False, k=key: self._pick_level(k))
+            self.level_btns.append(btn)
+            level_row.addWidget(btn)
+        level_row.addStretch(1)
+        root.addLayout(level_row)
+        self._sync_level_ui()
+
+        # 输入框：多行，写糙话 / 展示捋好结果
+        self.input = QPlainTextEdit()
+        self.input.setObjectName("polishInput")
+        self.input.setPlaceholderText("写下你想对 AI 说的话…")
+        self.input.setFixedHeight(120)
+        root.addWidget(self.input)
+        # 输入框聚焦时不淡出（与问问小花一致）
+        self.input._polish_orig_focus_in = self.input.focusInEvent
+        self.input._polish_orig_focus_out = self.input.focusOutEvent
+        self.input.focusInEvent = self._on_input_focus_in
+        self.input.focusOutEvent = self._on_input_focus_out
+
+        # 按钮行：捋一捋 + 发送
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+        self.btn_polish = QPushButton("✨ 捋一捋")
+        self.btn_polish.setObjectName("polishBtn")
+        self.btn_polish.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_polish.setToolTip("按当前力度把输入框内容捋得更好让 AI 理解")
+        self.btn_polish.clicked.connect(self.polish_async)
+        btn_row.addWidget(self.btn_polish, 1)
+        self.btn_send = QPushButton("发送")
+        self.btn_send.setObjectName("polishSendBtn")
+        self.btn_send.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_send.setToolTip("把当前内容发进当前对话（以你的身份）")
+        self.btn_send.clicked.connect(self.send_async)
+        btn_row.addWidget(self.btn_send, 1)
+        root.addLayout(btn_row)
+
+        self.lbl_status = QLabel("")
+        self.lbl_status.setObjectName("polishStatus")
+        self.lbl_status.setWordWrap(True)
+        self.lbl_status.hide()
+        root.addWidget(self.lbl_status)
+
+    # ── 档位 ──
+    def _pick_level(self, key):
+        self._level = key if key in dict(self.POLISH_LEVELS) else "standard"
+        self._sync_level_ui()
+
+    def _sync_level_ui(self):
+        for btn in self.level_btns:
+            on = btn.property("level") == self._level
+            btn.setChecked(on)
+            btn.setProperty("active", "true" if on else "false")
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
+
+    def current_level(self):
+        return self._level
+
+    def polish_text(self):
+        return self.input.toPlainText().strip()
+
+    # ── 发送目标（与朗读/主面板共用同一套 TargetMenu 协议） ──
+    def _update_target(self):
+        arrow = "▴" if self.target_menu is not None and self.target_menu.isVisible() else "▾"
+        if self.ball.target_mode == "pinned" and self.ball.pinned_target:
+            title = (self.ball.target_title or self.ball.pinned_target.get("title") or "").strip()
+            label = f"固定 · {title[:8]}" if title else "固定"
+        else:
+            label = "跟随最近"
+        self.btn_target.setText(f"{label} {arrow}")
+        self._update_target_info()
+
+    def _update_target_info(self):
+        name = (self.ball.target_name or "").strip()
+        if self.ball.target_mode == "pinned" and self.ball.pinned_target:
+            title = (self.ball.target_title or self.ball.pinned_target.get("title") or "").strip()
+            prefix = "固定对话"
+        else:
+            title = (self.ball.target_title or "").strip()
+            prefix = "跟随最近"
+        if title:
+            text = " · ".join([prefix, name, title]) if name else " · ".join([prefix, title])
+        elif name:
+            text = " · ".join([prefix, name]) + "（无标题）"
+        else:
+            text = "跟随最近 · 正在定位对话…"
+        self.lbl_target_info.setText(text)
+
+    def _open_target_menu(self):
+        show = not self.target_menu.isVisible()
+        self._set_target_selector_visible(show)
+        if show:
+            self.target_menu.view_mode = "pinned" if self.ball.target_mode == "pinned" else "auto"
+            self.target_menu.refresh_sessions_async()
+
+    def _set_target_selector_visible(self, visible):
+        self.target_menu.setVisible(bool(visible))
+        self._update_target()
+        self._resize_after_target_change()
+
+    def invalidate_target_sync(self):
+        """用户主动切目标时作废先前的 /target 回包，避免旧状态覆盖新选择。"""
+        self._target_seq += 1
+
+    def _resize_after_target_change(self):
+        def settle():
+            self._sync_size()
+            if self.isVisible():
+                if self._user_dragged:
+                    self._reanchor()
+                else:
+                    self._move_to_ball()
+        QTimer.singleShot(0, lambda: QTimer.singleShot(0, settle))
+
+    def _sync_target_state(self):
+        """打开弹窗时同步一次全局目标（pinned 固定 / 跟随最近），并刷新显示。"""
+        self._target_seq += 1
+        target_seq = self._target_seq
+        target_revision = getattr(self.ball, "target_revision", 0)
+
+        def worker():
+            payload = None
+            try:
+                data = api_get("/target", timeout=4)
+                if data.get("ok"):
+                    payload = {**data, "seq": target_seq, "target_revision": target_revision}
+            except Exception:
+                pass
+            if payload is not None and not self._closed:
+                try:
+                    self.target_ready.emit(payload)
+                except RuntimeError:
+                    pass
+
+        threading.Thread(target=worker, daemon=True, name="zhujian-polish-target").start()
+
+    def _apply_target_state(self, data):
+        if data.get("seq") != self._target_seq:
+            return
+        if data.get("target_revision", getattr(self.ball, "target_revision", 0)) != getattr(self.ball, "target_revision", 0):
+            return
+        t = data.get("target") or {}
+        self.ball.target_name = t.get("name") or t.get("agentId") or ""
+        self.ball.target_title = t.get("title") or ""
+        self.ball.target_mode = "pinned" if data.get("mode") == "pinned" else "auto"
+        self.ball.pinned_target = data.get("pinned")
+        self._update_target()
+
+    # ── 润色 ──
+    def polish_async(self):
+        if self._polishing:
+            return
+        text = self.polish_text()
+        if not text:
+            self._set_status("先写点什么再捋嘛", ok=False)
+            return
+        self._polishing = True
+        self._request_seq += 1
+        request_seq = self._request_seq
+        self._set_busy(True, polishing=True)
+        self._set_status("正在捋…", ok=True)
+        level = self._level
+
+        def worker():
+            payload = {"ok": False, "error": "连不上解语花，看看插件开着没", "seq": request_seq}
+            try:
+                data = api_post("/polish", {"text": text, "level": level}, timeout=35)
+                payload.update(data or {})
+            except urllib.error.HTTPError as e:
+                try:
+                    body = json.loads(e.read().decode("utf-8", "replace"))
+                    payload["error"] = body.get("error") or f"捋失败了 ({e.code})"
+                except Exception:
+                    payload["error"] = f"捋失败了 ({e.code})"
+            except Exception as ex:
+                payload["error"] = f"连不上解语花（{ex}），看看悬浮球还开着没"
+            if self._closed or request_seq != self._request_seq:
+                return
+            try:
+                self.polish_ready.emit(payload)
+            except RuntimeError:
+                pass
+
+        threading.Thread(target=worker, daemon=True, name="zhujian-polish-worker").start()
+
+    def _apply_polish_result(self, payload):
+        if self._closed or (payload.get("seq") is not None and payload.get("seq") != self._request_seq):
+            return
+        self._polishing = False
+        self._set_busy(False, polishing=True)
+        if payload.get("ok"):
+            self.input.setPlainText(payload.get("text") or "")
+            self._set_status("捋好了，可以再改改", ok=True)
+            self.input.setFocus()
+        else:
+            self._set_status(payload.get("error") or "没捋出结果，再试一次", ok=False)
+
+    # ── 发送 ──
+    def send_async(self):
+        if self._sending:
+            return
+        text = self.polish_text()
+        if not text:
+            self._set_status("没有可发送的内容", ok=False)
+            return
+        self._sending = True
+        self._request_seq += 1
+        request_seq = self._request_seq
+        self._set_busy(True, sending=True)
+        self._set_status("正在发送…", ok=True)
+
+        def worker():
+            payload = {"ok": False, "error": "连不上解语花，看看插件开着没", "seq": request_seq}
+            try:
+                data = api_post("/polish/send", {"text": text}, timeout=25)
+                payload.update(data or {})
+            except urllib.error.HTTPError as e:
+                try:
+                    body = json.loads(e.read().decode("utf-8", "replace"))
+                    payload["error"] = body.get("error") or f"发送失败了 ({e.code})"
+                except Exception:
+                    payload["error"] = f"发送失败了 ({e.code})"
+            except Exception as ex:
+                payload["error"] = f"连不上解语花（{ex}），看看悬浮球还开着没"
+            if self._closed or request_seq != self._request_seq:
+                return
+            try:
+                self.send_ready.emit(payload)
+            except RuntimeError:
+                pass
+
+        threading.Thread(target=worker, daemon=True, name="zhujian-polish-send").start()
+
+    def _apply_send_result(self, payload):
+        if self._closed or (payload.get("seq") is not None and payload.get("seq") != self._request_seq):
+            return
+        self._sending = False
+        self._set_busy(False, sending=True)
+        if payload.get("ok"):
+            self._flash("已发送 ✨")
+            QTimer.singleShot(450, self._close_and_clear)
+        else:
+            self._set_status(payload.get("error") or "发送失败，再试一次", ok=False)
+
+    def _close_and_clear(self):
+        # 发送成功：收起弹窗，下次打开是干净的输入框（默认标准档）
+        self.input.clear()
+        self._level = "standard"
+        self._sync_level_ui()
+        self.close()
+
+    # ── 状态/忙碌 ──
+    def _set_status(self, text, ok=True):
+        self.lbl_status.setText(text)
+        self.lbl_status.setStyleSheet("" if ok else "color:#e07090;")
+        self.lbl_status.show()
+
+    def _clear_status(self):
+        self.lbl_status.hide()
+        self.lbl_status.setText("")
+
+    def _set_busy(self, busy, polishing=False, sending=False):
+        if polishing or sending:
+            # 请求期间锁住输入框，避免回包覆盖用户刚改的新内容
+            self.input.setReadOnly(busy)
+        if polishing:
+            self.btn_polish.setEnabled(not busy)
+        if sending:
+            self.btn_send.setEnabled(not busy)
+        if polishing and busy:
+            self.btn_send.setEnabled(False)
+        if sending and busy:
+            self.btn_polish.setEnabled(False)
+        if not busy:
+            self.btn_polish.setEnabled(True)
+            self.btn_send.setEnabled(True)
+
+    def _flash(self, text):
+        self._set_status(text, ok=True)
+
+    # ── 展示/定位 ──
+    def open_near_ball(self):
+        """从主面板工具卡点开：主面板已让位，弹窗直接贴在球旁边（跟朗读同款）。"""
+        self._closed = False
+        self._user_dragged = False
+        self.input.setReadOnly(False)
+        self.apply_theme()
+        self._update_target()
+        self._sync_size()
+        self.input.setFocus()
+        self._move_to_ball()
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self._sync_target_state()
+
+    def _move_to_ball(self):
+        """按花朵重新锚定（展开/收起目标选择器后也用它校正位置）。"""
+        ball = self.ball
+        screen = ball.screen() or QApplication.primaryScreen()
+        geo = screen.availableGeometry()
+        x, y, side = position_popup_left_first(
+            (ball.x(), ball.y(), ball.width(), ball.height()),
+            (self.width(), self.height()),
+            (geo.left(), geo.top(), geo.right() + 1, geo.bottom() + 1),
+            gap=8,
+            anchor_ratio=PANEL_ANCHOR_RATIO,
+        )
+        if side != self.side:
+            self.side = side
+            if getattr(ball, "state", None) is not None:
+                ball.state["panel_side"] = side
+                save_state(ball.state)
+        self.move(x, y)
+
+    def _sync_size(self):
+        if self.layout() is not None:
+            self.layout().activate()
+        self.adjustSize()
+
+    def _reanchor(self):
+        self.adjustSize()
+        if self._user_dragged:
+            screen = self.ball.screen() or QApplication.primaryScreen()
+            geo = screen.availableGeometry()
+            x = max(geo.left(), min(self.x(), geo.right() - self.width() + 1))
+            y = max(geo.top(), min(self.y(), geo.bottom() - self.height() + 1))
+            self.move(x, y)
+
+    # ── 双窗拖动（与朗读/问问小花同一套：弹窗与花朵一组移动） ──
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self._drag_press = e.globalPosition().toPoint()
+            self._drag_panel_start = self.pos()
+            self._drag_ball_start = self.ball.pos()
+            self._drag_moved = False
+            reset_motion = getattr(self.ball, "_reset_drag_motion", None)
+            if callable(reset_motion):
+                reset_motion()
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):
+        if self._drag_press is not None and (e.buttons() & Qt.MouseButton.LeftButton):
+            cur = e.globalPosition().toPoint()
+            delta = cur - self._drag_press
+            if not self._drag_moved:
+                if delta.manhattanLength() < QApplication.startDragDistance():
+                    return
+                self._drag_moved = True
+                self._user_dragged = True
+            screen = self.ball.screen() or QApplication.primaryScreen()
+            geo = screen.availableGeometry()
+            dx = max(geo.left() - self._drag_panel_start.x(), min(delta.x(), geo.right() - self.width() + 1 - self._drag_panel_start.x()))
+            dy = max(geo.top() - self._drag_panel_start.y(), min(delta.y(), geo.bottom() - self.height() + 1 - self._drag_panel_start.y()))
+            self.move(self._drag_panel_start + QPoint(dx, dy))
+            self.ball.move(self._drag_ball_start + QPoint(dx, dy))
+            record_motion = getattr(self.ball, "_record_drag_motion", None)
+            if callable(record_motion):
+                record_motion()
+        super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            if self._drag_moved:
+                release_motion = getattr(self.ball, "_release_drag_motion", None)
+                if callable(release_motion):
+                    release_motion()
+                try:
+                    self.ball._save_pos()
+                except Exception:
+                    pass
+            self._drag_press = None
+            self._drag_panel_start = None
+            self._drag_ball_start = None
+        super().mouseReleaseEvent(e)
+
+    def enterEvent(self, event):
+        super().enterEvent(event)
+        self._on_fade_enter()
+
+    def leaveEvent(self, event):
+        super().leaveEvent(event)
+        self._on_fade_leave()
+
+    def _fade_allowed(self):
+        # 正在润色/发送或输入框有焦点时不淡出
+        if self._polishing or self._sending:
+            return False
+        return not self.input.hasFocus()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._reset_fade_on_show()
+        self.input.setFocus()
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self._cancel_fade()
+        try:
+            self.ball._set_fusion_panel_state("none")
+        except Exception:
+            pass
+
+    def closeEvent(self, event):
+        self._closed = True
+        self._request_seq += 1
+        self._target_seq += 1
+        self._polishing = False
+        self._sending = False
+        self.input.setReadOnly(False)
+        self.btn_polish.setEnabled(True)
+        self.btn_send.setEnabled(True)
+        super().closeEvent(event)
+
+    def _on_input_focus_in(self, event):
+        self._fade_out_timer.stop()
+        self._fade_to(1.0, FADE_IN_DURATION_MS)
+        orig = getattr(self.input, "_polish_orig_focus_in", None)
+        if orig is not None:
+            orig(event)
+
+    def _on_input_focus_out(self, event):
+        if self._fade_allowed() and not self._cursor_inside():
+            self._fade_out_timer.start(FADE_OUT_DELAY_MS)
+        orig = getattr(self.input, "_polish_orig_focus_out", None)
+        if orig is not None:
+            orig(event)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        c = THEME_COLORS[self.ball.theme_mode]
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        shadow = QColor(c["shadow"])
+        shadow.setAlpha(28 if self.ball.theme_mode == "light" else 52)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(shadow)
+        painter.drawRoundedRect(self.rect().adjusted(7, 8, -5, -3), 20, 20)
+
+        painter.setPen(QColor(c["border"]))
+        painter.setBrush(QColor(c["panel"]))
+        painter.drawRoundedRect(self.rect().adjusted(4, 3, -4, -6), 20, 20)
+        painter.end()
+
+    def apply_theme(self):
+        c = THEME_COLORS[self.ball.theme_mode]
+        self.setStyleSheet(f"""
+            #polishPanel {{
+                background: transparent; border: none;
+                font-family: "LXGW WenKai", "Microsoft YaHei UI";
+            }}
+            QLabel {{ background: transparent; color: {c['ink']}; }}
+            QLabel#polishHead {{ color: {c['accent_deep']}; font-size: 15px; font-weight: 700; }}
+            QLabel#polishDesc {{ color: {c['sub']}; font-size: 10px; padding-bottom: 1px; }}
+            QLabel#polishLevelLabel {{ color: {c['sub']}; font-size: 11px; }}
+            QLabel#polishTargetLabel {{ color: {c['sub_deep']}; font-size: 11px; }}
+            QLabel#polishTargetInfo {{ color: {c['sub']}; font-size: 10px; padding-left: 2px; }}
+            QPushButton#polishTargetBtn {{
+                min-height: 26px; padding: 0 10px;
+                color: {c['accent_deep']}; background: {c['surface_alt']};
+                border: 1px solid {c['border']}; border-radius: 10px;
+                font-size: 11px; font-weight: 600;
+            }}
+            QPushButton#polishTargetBtn:hover {{
+                background: {c['surface']}; border-color: {c['accent']};
+            }}
+            QPushButton#polishCloseBtn {{
+                color: {c['sub']}; background: transparent; border: none; border-radius: 12px;
+                font-size: 13px;
+            }}
+            QPushButton#polishCloseBtn:hover {{ background: {c['surface_alt']}; color: {c['ink']}; }}
+            QPushButton#polishLevelBtn {{
+                min-height: 26px; padding: 0 12px;
+                color: {c['sub']}; background: {c['surface']};
+                border: 1px solid {c['border']}; border-radius: 13px; font-size: 11px;
+            }}
+            QPushButton#polishLevelBtn:hover {{ color: {c['accent_deep']}; border-color: {c['accent']}; }}
+            QPushButton#polishLevelBtn[active="true"] {{
+                color: {c['accent_text']}; background: {c['accent']}; border-color: {c['accent']};
+                font-weight: 600;
+            }}
+            QPlainTextEdit#polishInput {{
+                color: {c['ink']}; background: {c['surface']};
+                border: 1px solid {c['border']}; border-radius: 10px;
+                padding: 8px 10px; font-size: 12px;
+            }}
+            QPlainTextEdit#polishInput:focus {{ border-color: {c['accent']}; }}
+            QPushButton#polishBtn, QPushButton#polishSendBtn {{
+                min-height: 32px; border-radius: 10px; font-size: 12px; font-weight: 600;
+            }}
+            QPushButton#polishBtn {{
+                color: {c['accent_text']}; background: {c['accent']};
+                border: 1px solid {c['accent']};
+            }}
+            QPushButton#polishBtn:hover {{ background: {c['accent_deep']}; border-color: {c['accent_deep']}; }}
+            QPushButton#polishSendBtn {{
+                color: {c['accent_deep']}; background: {c['surface']};
+                border: 1px solid {c['accent']};
+            }}
+            QPushButton#polishSendBtn:hover {{ background: {c['surface_alt']}; }}
+            QPushButton#polishBtn:disabled, QPushButton#polishSendBtn:disabled {{
+                color: {c['sub']}; background: {c['surface_alt']}; border-color: {c['border']};
+            }}
+            QLabel#polishStatus {{ color: {c['pink']}; font-size: 11px; font-weight: 600; }}
+        """)
 
 
 # ─────────────────────────────

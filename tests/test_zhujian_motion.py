@@ -399,7 +399,9 @@ class ZhujianMotionTests(QtTestCase):
         self.assertEqual(menu.lbl_rename_title.text(), "会话标题")
         self.assertEqual(menu.btn_rename.text(), "生成新标题")
         self.assertEqual(menu.btn_undo.text(), "还原")
-        self.assertEqual(len(menu.findChildren(zhujian.QFrame, "toolRow")), 3)
+        self.assertEqual(menu.lbl_polish_title.text(), "帮我捋捋")
+        self.assertEqual(menu.btn_polish.text(), "捋一捋")
+        self.assertEqual(len(menu.findChildren(zhujian.QFrame, "toolRow")), 4)
 
         menu.lbl_cache_time.setText("上次生成 10:38")
         menu.show()
