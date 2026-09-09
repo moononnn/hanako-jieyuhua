@@ -92,7 +92,7 @@ export default class Plugin {
   async onload() {
     const ctx = this.ctx;
     // dataDir 必须先落位：resume 断联检测的所有读写（getConfig / createResumePending / 待办落盘）都走它。
-    // 之前漏了这行导致 this._dataDir=undefined，断联候选 32 次但待办 0 次写入，悬浮球「继续」窗口从未弹出（2026-08-27 实机排查）。
+    // 之前漏了这行导致 this._dataDir=undefined，断联候选 32 次但待办 0 次写入，悬浮球「继续哈」窗口从未弹出（2026-08-27 实机排查）。
     this._dataDir = ctx.dataDir || path.join(HANA_HOME, "plugin-data", ctx.pluginId);
     if (ctx.bus.handle) {
       this.register(ctx.bus.handle("jiegehua:status", (payload) => {
@@ -120,13 +120,13 @@ export default class Plugin {
     // ── 断联续接（resume）：订阅 bus 事件流，识别异常回合，登记悬浮球待办 ──
     this._lastUserMsgAt = new Map();     // sessionId -> ts（用户最近一次发消息）
     this._resumeTimers = new Map();      // sessionId -> 自动续接定时器
-    this._recentResumeSends = new Map(); // sessionId -> ts（自己刚发过「继续」，2 秒内不把回执当用户消息）
+    this._recentResumeSends = new Map(); // sessionId -> ts（自己刚发过「继续哈」，2 秒内不把回执当用户消息）
     this._resumeTracker = new ResumeTurnTracker({
       onAlert: (alert) => this._handleResumeAlert(alert).catch((error) => {
         ctx.log?.error?.("[解语花] 断联待办创建失败", { error: error?.message || String(error) });
       }),
     });
-    // 思考卡死检测（2026-08-29）：turn_start 后 90 秒无任何收尾事件 → 判停滞，弹「继续」卡。
+    // 思考卡死检测（2026-08-29）：turn_start 后 90 秒无任何收尾事件 → 判停滞，弹「继续哈」卡。
     // 与 ResumeTurnTracker 互补：那边管有事件可依的失败，这边管无事件的静默断流。
     this._stuckTracker = new StuckTurnTracker({
       onAlert: (alert) => this._handleResumeAlert(alert).catch((error) => {
@@ -162,7 +162,7 @@ export default class Plugin {
       // 用户自己发新消息 = 回合有活人接手：停滞心跳取消，断联待办清掉
       this._stuckTracker.onActivity(sid);
       const selfSent = this._recentResumeSends.get(sid);
-      if (selfSent && Date.now() - selfSent < 2000) return; // 自己发的「继续」，不算用户接手
+      if (selfSent && Date.now() - selfSent < 2000) return; // 自己发的「继续哈」，不算用户接手
       this._recentResumeSends.delete(sid);
       resetResumeConsecutive(this._dataDir, sid);
       dismissResumeBySession(this._dataDir, sid);
@@ -254,7 +254,7 @@ export default class Plugin {
     }
   }
 
-  // ── 断联登记：自动模式直发「继续」；手动模式建悬浮球待办 ──
+  // ── 断联登记：自动模式直发「继续哈」；手动模式建悬浮球待办 ──
   async _handleResumeAlert(alert) {
     const sessionId = String(alert?.sessionId || "");
     const agentId = String(alert?.agentId || "");
@@ -299,7 +299,7 @@ export default class Plugin {
     this.ctx.log?.info?.("[解语花] 断联已登记", { sessionId, agentId, reason });
   }
 
-  // ── 自动续接：往断联会话直发「继续」；失败回退成待办弹窗 ──
+  // ── 自动续接：往断联会话直发「继续哈」；失败回退成待办弹窗 ──
   async _fireAutoResume(sessionId, agentId, sessionPath, reason) {
     try {
       this._recentResumeSends.set(sessionId, Date.now());

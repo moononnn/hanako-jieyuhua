@@ -7,7 +7,7 @@ from _zhujian_test_support import QtTestCase, zhujian
 
 
 class ResumeCardTests(QtTestCase):
-    """断联续接卡片：显示/收起/继续按钮/自动开关/提问优先（离屏）"""
+    """断联续接卡片：显示/收起/继续哈按钮/自动开关/提问优先（离屏）"""
 
     def _make_panel(self):
         app = zhujian.QApplication.instance() or zhujian.QApplication([])
@@ -176,7 +176,7 @@ class ResumeCardTests(QtTestCase):
             panel._apply_resume_continue_result({"ok": False, "error": "发送失败"})
             self.assertFalse(panel._resume_finished)
             self.assertTrue(panel.btn_resume_continue.isEnabled())
-            self.assertEqual(panel.btn_resume_continue.text(), "继续")
+            self.assertEqual(panel.btn_resume_continue.text(), "继续哈")
             self.assertIn("发送失败", panel.lbl_resume_reason.text())
         finally:
             panel.close()
@@ -246,6 +246,7 @@ class ResumeCardTests(QtTestCase):
             panel.show_resume_notice({"agentName": "小花", "title": "插件闲聊", "ts": 1})
             self.assertFalse(panel.lbl_resume_notice.isHidden())
             self.assertIn("插件闲聊", panel.lbl_resume_notice.text())
+            self.assertIn("继续哈", panel.lbl_resume_notice.text())
             wait_loop = QEventLoop()
             zhujian.QTimer.singleShot(4300, wait_loop.quit)
             wait_loop.exec()

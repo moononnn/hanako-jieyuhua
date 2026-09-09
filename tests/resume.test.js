@@ -169,7 +169,7 @@ test("buildResumeCard 拼窗口名与原因", () => {
   });
   assert.equal(card.title, "🌸 窗口断联了");
   assert.ok(card.body.includes("小花 · 插件闲聊"));
-  assert.ok(card.body.includes("点「继续」接上话头"));
+  assert.ok(card.body.includes("点「继续哈」接上话头"));
 });
 
 // ─── 状态机 ───
@@ -258,8 +258,8 @@ test("flush 立即触发兜底（测试入口）", () => {
   assert.equal(alerted.source, "turn_failure");
 });
 
-test("RESUME_TEXT 使用分享版统一文案「继续」", () => {
-  assert.equal(RESUME_TEXT, "继续");
+test("RESUME_TEXT 使用本地与线上统一文案「继续哈」", () => {
+  assert.equal(RESUME_TEXT, "继续哈");
 });
 
 // ─── 待办队列 ───
