@@ -246,6 +246,14 @@ python tests/run_all.py
 
 ## 许可
 
-MIT License
+本项目从 **v1.0.73** 起采用 **PolyForm Noncommercial License 1.0.0**。
+这是源码公开的非商业许可，不属于 OSI 定义的开源软件。
+
+- 允许个人和其他非商业目的使用、修改和分发；
+- 分发时必须提供许可证文本或链接，并保留 `NOTICE` 中的来源声明；
+- 商业使用须事先取得作者书面授权，具体方式见 [`COMMERCIAL-LICENSE.md`](./COMMERCIAL-LICENSE.md)。
+
+此前已经发布的版本继续按原 MIT License 执行；新协议不追溯修改旧版本的授权。
+第三方代码、依赖、图片、字体和其他素材仍按各自许可证执行。
 
 Made with 💛 by [moononnn](https://github.com/moononnn) & 小花
