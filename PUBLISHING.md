@@ -26,7 +26,7 @@
 
 ### 必须包含
 
-- 根文件：`manifest.json`、`index.js`、`README.md`、`LICENSE`、`CHANGELOG.md`
+- 根文件：`manifest.json`、`index.js`、`README.md`、`LICENSE`、`NOTICE`、`COMMERCIAL-LICENSE.md`、`CHANGELOG.md`
 - 目录：`assets/`、`extensions/`、`lib/`、`python/`、`routes/`、`skills/`、`tools/`
 
 ### 必须排除
