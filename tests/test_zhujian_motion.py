@@ -401,7 +401,9 @@ class ZhujianMotionTests(QtTestCase):
         self.assertEqual(menu.btn_undo.text(), "还原")
         self.assertEqual(menu.lbl_polish_title.text(), "帮我捋捋")
         self.assertEqual(menu.btn_polish.text(), "捋一捋")
-        self.assertEqual(len(menu.findChildren(zhujian.QFrame, "toolRow")), 4)
+        self.assertEqual(menu.lbl_compaction_title.text(), "压缩档案")
+        self.assertEqual(menu.btn_compaction.text(), "查看档案")
+        self.assertEqual(len(menu.findChildren(zhujian.QFrame, "toolRow")), 5)
 
         menu.lbl_cache_time.setText("上次生成 10:38")
         menu.show()
@@ -513,9 +515,10 @@ class ZhujianMotionTests(QtTestCase):
             self.assertLessEqual(menu.btn_rename.geometry().right(), menu.rename_tool.width())
             self.assertLessEqual(menu.btn_undo.geometry().right(), menu.rename_tool.width())
             self.assertGreater(menu.btn_undo.geometry().y(), menu.btn_rename.geometry().y())
-            # 新增「问问小花」工具行后，标题工具整体变窄：不硬性要求 100px，
-            # 只验证两个按钮都在自己的工具行内、还原在生成按钮下方（布局没塌）。
-            self.assertGreaterEqual(menu.rename_tool.height(), 84)
+            # 新增第 5 个工具行（压缩档案）后，窄面板下的高度预算更紧：主面板真实宽度固定 344，
+            # 280 只作压力档，验证两个按钮仍在行内、还原在生成下方（布局没塌）。
+            min_height = 84 if width >= 344 else 76
+            self.assertGreaterEqual(menu.rename_tool.height(), min_height)
         menu.close()
         ball.close()
         app.processEvents()

@@ -31,6 +31,7 @@ import math
 import random
 import time
 import base64
+import datetime
 import threading
 import tempfile
 import urllib.request
@@ -1601,15 +1602,18 @@ class ZhujianBall(QWidget):
         self._drag_read_was_visible = False
         self._drag_ask_was_visible = False
         self._drag_polish_was_visible = False
+        self._drag_compaction_was_visible = False
         self._drag_menu_start = None
         self._drag_read_start = None
         self._drag_ask_start = None
         self._drag_polish_start = None
+        self._drag_compaction_start = None
         self._drag_ball_start = None
         self.menu = None
         self.read_panel = None        # 独立朗读窗口（由主面板「念给我听」打开）
         self.ask_flower_dialog = None  # 「问问小花」输入弹窗（右键浮签打开，懒创建）
         self.polish_panel = None      # 「帮我捋捋」弹窗（由主面板「捋一捋」打开，二级）
+        self.compaction_panel = None  # 「压缩档案」弹窗（由主面板打开，二级；只读）
         self._ask_poll_inflight = False
         self.ask_ready.connect(self._apply_ask_payload)
         # 右键浮签不再是 Popup（Popup 会抢在 toggle 前自动关闭，无法实现"再按一次右键收起"），
@@ -1723,6 +1727,8 @@ class ZhujianBall(QWidget):
                     self.read_panel.close()
                 if self.polish_panel is not None and self.polish_panel.isVisible():
                     self.polish_panel.close()
+                if self.compaction_panel is not None and self.compaction_panel.isVisible():
+                    self.compaction_panel.close()
                 if not self.menu.is_ask_open():
                     self.menu.prepare_for_show()
                 self.menu.move_to_ball()
@@ -1761,6 +1767,8 @@ class ZhujianBall(QWidget):
                     self.read_panel.close()
                 if self.polish_panel is not None and self.polish_panel.isVisible():
                     self.polish_panel.close()
+                if self.compaction_panel is not None and self.compaction_panel.isVisible():
+                    self.compaction_panel.close()
                 if not self.menu.is_ask_open() and not self.menu.is_resume_open():
                     self.menu.prepare_for_show()
                 self.menu.move_to_ball()
@@ -1810,6 +1818,9 @@ class ZhujianBall(QWidget):
         if self.polish_panel is not None:
             self.polish_panel.apply_theme()
             self.polish_panel.update()
+        if self.compaction_panel is not None:
+            self.compaction_panel.apply_theme()
+            self.compaction_panel.update()
 
     # ── SVG 渲染 ──
     def _render_svg_to_pixmap(self, name, size):
@@ -1860,7 +1871,7 @@ class ZhujianBall(QWidget):
         save_state(self.state)
 
     def _set_fusion_panel_state(self, panel):
-        panel = panel if panel in {"none", "menu", "ask", "read", "polish"} else "none"
+        panel = panel if panel in {"none", "menu", "ask", "read", "polish", "compaction"} else "none"
         if self.state.get("fusionPanel") == panel:
             return
         self.state["fusionPanel"] = panel
@@ -2371,6 +2382,14 @@ class ZhujianBall(QWidget):
                 and self.polish_panel.isVisible()
             )
             self._drag_polish_start = self.polish_panel.pos() if self._drag_polish_was_visible else None
+            # 压缩档案同样是二级弹窗：球被单独拖动时它也要跟着走（与朗读/润色同款）
+            self._drag_compaction_was_visible = bool(
+                self.compaction_panel is not None
+                and self.compaction_panel.isVisible()
+            )
+            self._drag_compaction_start = (
+                self.compaction_panel.pos() if self._drag_compaction_was_visible else None
+            )
             self._drag_ball_start = self.pos()
             self._press_global = e.globalPosition().toPoint()
             self._drag = self._press_global - self.pos()
@@ -2389,7 +2408,7 @@ class ZhujianBall(QWidget):
                 self._moved = True
                 self._cancel_press_for_drag()
             delta = current - self._press_global
-            if self._drag_menu_was_visible or self._drag_read_was_visible or self._drag_ask_was_visible or self._drag_polish_was_visible:
+            if self._drag_menu_was_visible or self._drag_read_was_visible or self._drag_ask_was_visible or self._drag_polish_was_visible or self._drag_compaction_was_visible:
                 self._sync_dragged_popups(delta)
             else:
                 self.move(current - self._drag)
@@ -2415,10 +2434,12 @@ class ZhujianBall(QWidget):
             self._drag_read_was_visible = False
             self._drag_ask_was_visible = False
             self._drag_polish_was_visible = False
+            self._drag_compaction_was_visible = False
             self._drag_menu_start = None
             self._drag_read_start = None
             self._drag_ask_start = None
             self._drag_polish_start = None
+            self._drag_compaction_start = None
             self._drag_ball_start = None
         elif e.button() == Qt.MouseButton.RightButton:
             self._toggle_context_menu(e.globalPosition().toPoint())
@@ -2445,6 +2466,8 @@ class ZhujianBall(QWidget):
             popups.append((self.ask_flower_dialog, self._drag_ask_start))
         if self._drag_polish_was_visible and self.polish_panel is not None:
             popups.append((self.polish_panel, self._drag_polish_start))
+        if self._drag_compaction_was_visible and self.compaction_panel is not None:
+            popups.append((self.compaction_panel, self._drag_compaction_start))
         if not popups:
             return
         delta = desired_delta if desired_delta is not None else self.pos() - self._drag_ball_start
@@ -2501,6 +2524,10 @@ class ZhujianBall(QWidget):
         if self.polish_panel is not None and self.polish_panel.isVisible():
             self.polish_panel.close()
             return
+        # 主面板没开，但压缩档案开着：同上，先收掉不展开面板
+        if self.compaction_panel is not None and self.compaction_panel.isVisible():
+            self.compaction_panel.close()
+            return
         # 主面板没开，但问问小花弹窗开着：先收掉它，再正常展开主面板
         if self.ask_flower_dialog is not None and self.ask_flower_dialog.isVisible():
             self.ask_flower_dialog.close()
@@ -2519,6 +2546,8 @@ class ZhujianBall(QWidget):
             self.read_panel.close()
         if self.polish_panel is not None and self.polish_panel.isVisible():
             self.polish_panel.close()
+        if self.compaction_panel is not None and self.compaction_panel.isVisible():
+            self.compaction_panel.close()
         if self.context_menu is None:
             self.context_menu = SendModeMenu(self)
         self.context_menu.show_at(global_pos)
@@ -2560,6 +2589,8 @@ class ZhujianBall(QWidget):
             self.read_panel.close()
         if self.polish_panel is not None and self.polish_panel.isVisible():
             self.polish_panel.close()
+        if self.compaction_panel is not None and self.compaction_panel.isVisible():
+            self.compaction_panel.close()
         if self.menu is None:
             self.menu = ZhujianMenu(self)
         if not self.menu.is_ask_open():
@@ -2925,6 +2956,30 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
         polish_row.addWidget(self.btn_polish)
         root.addWidget(self.polish_tool)
 
+        # 压缩档案：把这段对话被压缩后的摘要摊开看（只读，不发模型请求）
+        self.compaction_tool = QFrame()
+        self.compaction_tool.setObjectName("toolRow")
+        compaction_row = QHBoxLayout(self.compaction_tool)
+        compaction_row.setContentsMargins(10, 8, 10, 8)
+        compaction_row.setSpacing(10)
+        compaction_copy = QVBoxLayout()
+        compaction_copy.setSpacing(2)
+        self.lbl_compaction_title = QLabel("压缩档案")
+        self.lbl_compaction_title.setObjectName("toolTitle")
+        compaction_copy.addWidget(self.lbl_compaction_title)
+        self.lbl_compaction_desc = QLabel("看看这段对话被压缩成了什么，记忆还全不全")
+        self.lbl_compaction_desc.setObjectName("toolDesc")
+        self.lbl_compaction_desc.setWordWrap(True)
+        compaction_copy.addWidget(self.lbl_compaction_desc)
+        compaction_row.addLayout(compaction_copy, 1)
+        self.btn_compaction = QPushButton("查看档案")
+        self.btn_compaction.setObjectName("renameBtn")
+        self.btn_compaction.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_compaction.setToolTip("打开压缩档案：看这段对话被压缩后的摘要全文（对话没压缩过会直接说明）")
+        self.btn_compaction.clicked.connect(self._open_compaction_panel)
+        compaction_row.addWidget(self.btn_compaction)
+        root.addWidget(self.compaction_tool)
+
         self.lbl_feedback = QLabel("")
         self.lbl_feedback.setObjectName("feedback")
         root.addWidget(self.lbl_feedback)
@@ -3177,7 +3232,7 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
             for widget in (
                 self.lbl_target_label, self.btn_target, self.lbl_target_info,
                 self.recommend_body,
-                self.lbl_section, self.say_tool, self.ask_flower_tool, self.rename_tool, self.polish_tool, self.lbl_hint,
+                self.lbl_section, self.say_tool, self.ask_flower_tool, self.rename_tool, self.polish_tool, self.compaction_tool, self.lbl_hint,
             ):
                 widget.hide()
             self.target_menu.hide()
@@ -3205,7 +3260,7 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
             for widget in (
                 self.lbl_target_label, self.btn_target, self.lbl_target_info,
                 self.recommend_body,
-                self.lbl_section, self.say_tool, self.rename_tool, self.polish_tool, self.lbl_hint,
+                self.lbl_section, self.say_tool, self.rename_tool, self.polish_tool, self.compaction_tool, self.lbl_hint,
             ):
                 widget.show()
             self.set_ask_flower_enabled(self._ask_flower_enabled)
@@ -3508,7 +3563,7 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
             for widget in (
                 self.lbl_target_label, self.btn_target, self.lbl_target_info,
                 self.recommend_body,
-                self.lbl_section, self.say_tool, self.ask_flower_tool, self.rename_tool, self.polish_tool, self.lbl_hint,
+                self.lbl_section, self.say_tool, self.ask_flower_tool, self.rename_tool, self.polish_tool, self.compaction_tool, self.lbl_hint,
             ):
                 widget.hide()
             self.target_menu.hide()
@@ -3525,7 +3580,7 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
             for widget in (
                 self.lbl_target_label, self.btn_target, self.lbl_target_info,
                 self.recommend_body,
-                self.lbl_section, self.say_tool, self.rename_tool, self.polish_tool, self.lbl_hint,
+                self.lbl_section, self.say_tool, self.rename_tool, self.polish_tool, self.compaction_tool, self.lbl_hint,
             ):
                 widget.show()
             self.resume_body.hide()
@@ -3739,6 +3794,14 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
         self.close_menu()                       # 推荐面板让位，不再自带润色按钮
         self.ball.polish_panel.open_near_ball()
         self.ball._set_fusion_panel_state("polish")
+
+    def _open_compaction_panel(self):
+        """点「查看档案」：主面板让位，只留压缩档案窗独立展示（只读，不发模型请求）。"""
+        if self.ball.compaction_panel is None:
+            self.ball.compaction_panel = CompactionPanel(self.ball)
+        self.close_menu()                       # 推荐面板让位，跟朗读/润色同款
+        self.ball.compaction_panel.open_near_ball()
+        self.ball._set_fusion_panel_state("compaction")
 
     def _update_say_btn(self):
         """让朗读工具的说明跟随当前判定的助手名，按钮本身保持统一动作文案。"""
@@ -5245,6 +5308,543 @@ class ReadPanel(QFrame):
         if hasattr(self, "target_menu"):
             self.target_menu.apply_theme()
         self._render_replies()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        c = THEME_COLORS[self.ball.theme_mode]
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        shadow = QColor(c["shadow"])
+        shadow.setAlpha(28 if self.ball.theme_mode == "light" else 52)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(shadow)
+        painter.drawRoundedRect(self.rect().adjusted(7, 8, -5, -3), 20, 20)
+
+        painter.setPen(QColor(c["border"]))
+        painter.setBrush(QColor(c["panel"]))
+        painter.drawRoundedRect(self.rect().adjusted(4, 3, -4, -6), 20, 20)
+        painter.end()
+
+
+# ─────────────────────────────
+#  压缩档案弹窗（主面板「查看档案」打开：只读看压缩摘要）
+# ─────────────────────────────
+class CompactionPanel(FadeOnLeaveMixin, QFrame):
+    """把当前目标对话被压缩后的摘要摊开给用户看。
+
+    数据来自代理 /compaction（读会话 JSONL 里的 compaction 条目）：只读、不调模型、
+    不写任何文件。对话没压缩过时直接说明，不报错。
+    定位/双窗拖动/主题/鼠标离开淡出与朗读、润色弹窗同一套。"""
+
+    archive_ready = pyqtSignal(object)
+
+    WIDTH = 320
+    SUMMARY_HEIGHT = 232
+
+    def __init__(self, ball):
+        super().__init__(None)
+        self.ball = ball
+        # 面板边向：与推荐/朗读窗共用同一份 panel_side（贴边翻边后写入）
+        self.side = str((getattr(self.ball, "state", None) or {}).get("panel_side") or "left")
+        # 双窗拖动状态：档案窗与花朵始终作为一组移动
+        self._drag_press = None
+        self._drag_panel_start = None
+        self._drag_ball_start = None
+        self._drag_moved = False
+        self._user_dragged = False
+        self._closed = False
+        self._seq = 0
+        self._archive = None      # 最近一次回包
+        self._session_path = ""   # 打开时锁定的目标对话，防止看到一半串窗
+        self._count = 0           # 这段对话一共压缩过几次
+        self._index = 0           # 0 = 最近一次，往前递增
+
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+            | Qt.WindowType.NoDropShadowWindowHint
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setObjectName("compactionPanel")
+        self.setFixedWidth(self.WIDTH)
+
+        self.archive_ready.connect(self._apply_archive)
+        self._build_ui()
+        self.apply_theme()
+        self.setup_fade_on_leave()
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(20, 14, 20, 16)
+        root.setSpacing(8)
+
+        head = QHBoxLayout()
+        head.setSpacing(8)
+        self.lbl_head = QLabel("压缩档案")
+        self.lbl_head.setObjectName("compactionHead")
+        head.addWidget(self.lbl_head)
+        head.addStretch(1)
+        self.btn_close = QPushButton("✕")
+        self.btn_close.setObjectName("compactionCloseBtn")
+        self.btn_close.setFixedSize(24, 24)
+        self.btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_close.setToolTip("收起压缩档案")
+        self.btn_close.clicked.connect(self.close)
+        head.addWidget(self.btn_close)
+        root.addLayout(head)
+
+        target_row = QHBoxLayout()
+        target_row.setSpacing(6)
+        self.lbl_target_label = QLabel("当前对话")
+        self.lbl_target_label.setObjectName("compactionTargetLabel")
+        self.btn_refresh = QPushButton("↻ 刷新")
+        self.btn_refresh.setObjectName("compactionBtn")
+        self.btn_refresh.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_refresh.setToolTip("重新读一次这段对话的压缩记录（不发模型请求）")
+        self.btn_refresh.clicked.connect(lambda checked=False: self.refresh_async())
+        target_row.addWidget(self.lbl_target_label)
+        target_row.addStretch(1)
+        target_row.addWidget(self.btn_refresh)
+        root.addLayout(target_row)
+
+        self.lbl_target_info = QLabel("")
+        self.lbl_target_info.setObjectName("compactionTargetInfo")
+        self.lbl_target_info.setWordWrap(True)
+        root.addWidget(self.lbl_target_info)
+
+        # 元信息：压缩时间 / 压缩前 token / 摘要字数
+        self.lbl_meta = QLabel("")
+        self.lbl_meta.setObjectName("compactionMeta")
+        self.lbl_meta.setWordWrap(True)
+        root.addWidget(self.lbl_meta)
+
+        self.lbl_sub = QLabel("")
+        self.lbl_sub.setObjectName("compactionSub")
+        self.lbl_sub.setWordWrap(True)
+        root.addWidget(self.lbl_sub)
+
+        # 摘要全文：限高 + 滚动，可选中复制
+        self.scroll = QScrollArea(self)
+        self.scroll.setObjectName("compactionScroll")
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll.setFixedHeight(self.SUMMARY_HEIGHT)
+        self.lbl_summary = QLabel("")
+        self.lbl_summary.setObjectName("compactionText")
+        self.lbl_summary.setWordWrap(True)
+        self.lbl_summary.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.lbl_summary.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        self.scroll.setWidget(self.lbl_summary)
+        root.addWidget(self.scroll)
+
+        # 翻历史压缩：第 N 次 / 共 M 次
+        self.pager = QFrame()
+        self.pager.setObjectName("compactionPager")
+        pager_row = QHBoxLayout(self.pager)
+        pager_row.setContentsMargins(0, 0, 0, 0)
+        pager_row.setSpacing(6)
+        self.lbl_pager = QLabel("")
+        self.lbl_pager.setObjectName("compactionSub")
+        pager_row.addWidget(self.lbl_pager)
+        pager_row.addStretch(1)
+        self.btn_older = QPushButton("← 更早")
+        self.btn_older.setObjectName("compactionBtn")
+        self.btn_older.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_older.setToolTip("往前翻，看更早一次压缩留下的摘要")
+        self.btn_older.clicked.connect(lambda checked=False: self.refresh_async(index=self._index + 1))
+        self.btn_newer = QPushButton("更近 →")
+        self.btn_newer.setObjectName("compactionBtn")
+        self.btn_newer.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_newer.setToolTip("往后翻，回到更近一次压缩")
+        self.btn_newer.clicked.connect(lambda checked=False: self.refresh_async(index=max(0, self._index - 1)))
+        pager_row.addWidget(self.btn_older)
+        pager_row.addWidget(self.btn_newer)
+        self.pager.hide()
+        root.addWidget(self.pager)
+
+        self.btn_copy = QPushButton("复制摘要")
+        self.btn_copy.setObjectName("compactionCopyBtn")
+        self.btn_copy.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_copy.setToolTip("把当前这条摘要全文复制到剪贴板")
+        self.btn_copy.clicked.connect(self.copy_summary)
+        self.btn_copy.setEnabled(False)
+        root.addWidget(self.btn_copy)
+
+        self.lbl_feedback = QLabel("")
+        self.lbl_feedback.setObjectName("compactionFeedback")
+        root.addWidget(self.lbl_feedback)
+
+    # ── 打开 / 定位 ──
+    def open_near_ball(self):
+        self._closed = False
+        self._user_dragged = False
+        self._seq += 1
+        self._archive = None
+        self._count = 0
+        self._index = 0
+        self._session_path = ""
+        self.lbl_target_info.setText("")
+        self.lbl_meta.setText("")
+        self.lbl_sub.setText("")
+        self.lbl_feedback.setText("")
+        self.lbl_summary.setText("正在读这段对话的压缩记录…")
+        self._set_pager_visible(False)
+        self.btn_copy.setEnabled(False)
+        self.apply_theme()
+        self.move_to_ball()
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self._settle()
+        self.refresh_async()
+
+    def move_to_ball(self):
+        """与推荐面板同一套定位：左侧优先，左侧放不下才翻到右侧。"""
+        self._sync_size()
+        b = self.ball
+        screen = b.screen() or QApplication.primaryScreen()
+        geo = screen.availableGeometry()
+        bw = b.width()
+        bh = b.height()
+        x, y, side = position_popup_left_first(
+            (b.x(), b.y(), bw, bh),
+            (self.width(), self.height()),
+            (geo.left(), geo.top(), geo.right() + 1, geo.bottom() + 1),
+            gap=8,
+            anchor_ratio=PANEL_ANCHOR_RATIO,
+        )
+        if side != self.side:
+            self.side = side
+            if getattr(b, "state", None) is not None:
+                b.state["panel_side"] = side
+                save_state(b.state)
+        self.move(x, y)
+
+    def _keep_position(self):
+        if not self.isVisible():
+            return
+
+        def settle_now():
+            self._sync_size()
+            if self._user_dragged:
+                screen = self.ball.screen() or QApplication.primaryScreen()
+                geo = screen.availableGeometry()
+                x = max(geo.left(), min(self.x(), geo.right() - self.width() + 1))
+                y = max(geo.top(), min(self.y(), geo.bottom() - self.height() + 1))
+                self.move(x, y)
+            else:
+                self.move_to_ball()
+
+        QTimer.singleShot(0, lambda: QTimer.singleShot(0, settle_now))
+
+    def _sync_size(self):
+        if self.layout() is not None:
+            self.layout().activate()
+        self.adjustSize()
+
+    def _settle(self):
+        if not self.isVisible():
+            return
+        self._keep_position()
+
+    # ── 取数 ──
+    def refresh_async(self, index=None):
+        if index is not None:
+            self._index = max(0, int(index))
+        self._seq += 1
+        seq = self._seq
+        self.btn_refresh.setEnabled(False)
+        expected = self._session_path
+        requested_index = self._index
+        if self._archive is None:
+            self.lbl_summary.setText("正在读这段对话的压缩记录…")
+
+        def worker():
+            payload = {"seq": seq, "ok": False, "error": "读取失败，点「↻ 刷新」再试"}
+            try:
+                route = "/compaction?index=" + str(requested_index)
+                if expected:
+                    route += "&sessionPath=" + urllib.parse.quote(expected, safe="")
+                data = api_get(route, timeout=6)
+                if isinstance(data, dict):
+                    payload = dict(data)
+                    payload["seq"] = seq
+            except urllib.error.HTTPError as e:
+                try:
+                    body = json.loads(e.read().decode("utf-8"))
+                    payload["error"] = body.get("error") or f"读取失败了 ({e.code})"
+                except Exception:
+                    payload["error"] = f"读取失败了 ({e.code})"
+            except Exception:
+                pass
+            if self._closed:
+                return
+            try:
+                self.archive_ready.emit(payload)
+            except RuntimeError:
+                pass
+
+        threading.Thread(target=worker, daemon=True, name="jiegehua-compaction").start()
+
+    def _apply_archive(self, payload):
+        if payload.get("seq") != self._seq:
+            return
+        self.btn_refresh.setEnabled(True)
+        if payload.get("ok"):
+            returned = str(((payload.get("target") or {}).get("sessionPath")) or "")
+            if not self._session_path:
+                self._session_path = returned
+            elif returned and (
+                os.path.normcase(os.path.normpath(returned))
+                != os.path.normcase(os.path.normpath(self._session_path))
+            ):
+                # 看的过程里目标对话变了：不混着显示，提示重开（跟朗读的串窗保护同款）
+                self.lbl_summary.setText("当前对话刚刚变了，收起后重新打开档案看看")
+                return
+            self._count = int(payload.get("count") or 0)
+            self._index = int(payload.get("index") or 0)
+        self._archive = payload
+        self._render()
+        self._settle()
+
+    # ── 渲染 ──
+    def _render(self):
+        arch = self._archive or {}
+        target = arch.get("target") or {}
+        name = (target.get("name") or "助手").strip()
+        title = str(target.get("title") or "").strip()
+        mode = "固定窗口" if arch.get("mode") == "pinned" else "跟随最近"
+        line = f"{name} · {mode}"
+        if title:
+            line += f" · {title}"
+        self.lbl_target_info.setText(line)
+
+        if not arch.get("ok"):
+            self.lbl_meta.setText("")
+            self.lbl_sub.setText("")
+            self.lbl_summary.setText(str(arch.get("error") or "读取失败，点「↻ 刷新」再试"))
+            self._set_pager_visible(False)
+            self.btn_copy.setEnabled(False)
+            return
+
+        if not arch.get("compacted"):
+            self.lbl_meta.setText("这个对话还没压缩过")
+            self.lbl_sub.setText("上下文还短，也没触发过自动压缩。等它长了、压缩过之后，这里会摊出压缩后的摘要全文。")
+            self.lbl_summary.setText("记忆还全须全尾的，什么都没有被折叠。")
+            self._set_pager_visible(False)
+            self.btn_copy.setEnabled(False)
+            return
+
+        entry = arch.get("entry") or {}
+        summary = str(entry.get("summary") or "")
+        when = self._format_ts(entry.get("timestamp"))
+        tokens = self._format_tokens(entry.get("tokensBefore"))
+        chars = int(entry.get("summaryChars") or len(summary))
+
+        meta_bits = []
+        if when:
+            meta_bits.append(f"压缩于 {when}")
+        if tokens:
+            meta_bits.append(f"压缩前 {tokens} token")
+        meta_bits.append(f"摘要 {chars} 字")
+        self.lbl_meta.setText(" · ".join(meta_bits))
+
+        if self._index == 0:
+            entries = ((arch.get("verbatim") or {}).get("entries")) or 0
+            note = (
+                f"这是模型现在看到的历史概要；它之后又续了 {entries} 条原始记录，那些原文没被折叠。"
+                if entries
+                else "这是模型现在看到的历史概要；它之后还没有新的原始记录。"
+            )
+            if entry.get("truncated"):
+                note += "（摘要太长，这里只显示前一段，复制也是这一段）"
+            self.lbl_sub.setText(note)
+        else:
+            self.lbl_sub.setText("这是一次历史快照：它之后的内容已经被更晚的压缩覆盖，不在模型当前的视野里了。")
+
+        self.lbl_summary.setText(summary or "（这次压缩没有留下摘要文本）")
+        self.btn_copy.setEnabled(bool(summary))
+
+        if self._count > 1:
+            pos = self._index + 1
+            label = "最近一次" if self._index == 0 else f"往前第 {self._index} 次"
+            self.lbl_pager.setText(f"第 {pos} 次 / 共 {self._count} 次 · {label}")
+            self.btn_older.setEnabled(self._index < self._count - 1)
+            self.btn_newer.setEnabled(self._index > 0)
+            self._set_pager_visible(True)
+        else:
+            self._set_pager_visible(False)
+
+    def _set_pager_visible(self, visible):
+        self.pager.setVisible(bool(visible))
+
+    def copy_summary(self):
+        entry = (self._archive or {}).get("entry") or {}
+        text = str(entry.get("summary") or "")
+        if not text:
+            self._flash("还没有可复制的摘要")
+            return
+        try:
+            QApplication.clipboard().setText(text)
+            self._flash("摘要已复制 ✓")
+        except Exception:
+            self._flash("复制失败，手动选中也可以")
+
+    def _flash(self, text):
+        self.lbl_feedback.setText(text)
+
+    @staticmethod
+    def _format_ts(iso):
+        raw = str(iso or "").strip()
+        if not raw:
+            return ""
+        try:
+            dt = datetime.datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone()
+            return f"{dt.month}月{dt.day}日 {dt.hour:02d}:{dt.minute:02d}"
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _format_tokens(value):
+        try:
+            n = float(value)
+        except Exception:
+            return ""
+        if n >= 10000:
+            return f"{n / 10000:.1f} 万"
+        return str(int(n))
+
+    # ── 事件 ──
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._reset_fade_on_show()
+
+    def closeEvent(self, event):
+        self._closed = True
+        self._seq += 1
+        self._cancel_fade()
+        super().closeEvent(event)
+
+    def hideEvent(self, event):
+        self._seq += 1
+        self._archive = None
+        self._session_path = ""
+        self._count = 0
+        self._index = 0
+        self.lbl_feedback.setText("")
+        self._cancel_fade()
+        self.ball._set_fusion_panel_state("none")
+        super().hideEvent(event)
+
+    def enterEvent(self, event):
+        super().enterEvent(event)
+        self._on_fade_enter()
+
+    def leaveEvent(self, event):
+        super().leaveEvent(event)
+        self._on_fade_leave()
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self._drag_press = e.globalPosition().toPoint()
+            self._drag_panel_start = self.pos()
+            self._drag_ball_start = self.ball.pos()
+            self._drag_moved = False
+            reset_motion = getattr(self.ball, "_reset_drag_motion", None)
+            if callable(reset_motion):
+                reset_motion()
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):
+        if self._drag_press is not None and (e.buttons() & Qt.MouseButton.LeftButton):
+            cur = e.globalPosition().toPoint()
+            delta = cur - self._drag_press
+            if not self._drag_moved:
+                if delta.manhattanLength() < QApplication.startDragDistance():
+                    return
+                self._drag_moved = True
+                self._user_dragged = True
+            screen = self.ball.screen() or QApplication.primaryScreen()
+            geo = screen.availableGeometry()
+            dx, dy = clamp_pair_drag(
+                delta.x(), delta.y(),
+                (self._drag_panel_start.x(), self._drag_panel_start.y(), self.width(), self.height()),
+                (self._drag_ball_start.x(), self._drag_ball_start.y(), self.ball.width(), self.ball.height()),
+                (geo.left(), geo.top(), geo.right() + 1, geo.bottom() + 1),
+            )
+            self.move(self._drag_panel_start + QPoint(dx, dy))
+            self.ball.move(self._drag_ball_start + QPoint(dx, dy))
+            record_motion = getattr(self.ball, "_record_drag_motion", None)
+            if callable(record_motion):
+                record_motion()
+        super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            if self._drag_moved:
+                release_motion = getattr(self.ball, "_release_drag_motion", None)
+                if callable(release_motion):
+                    release_motion()
+                try:
+                    self.ball._save_pos()
+                except Exception:
+                    pass
+            self._drag_press = None
+            self._drag_panel_start = None
+            self._drag_ball_start = None
+            self._drag_moved = False
+        super().mouseReleaseEvent(e)
+
+    def apply_theme(self):
+        c = THEME_COLORS[self.ball.theme_mode]
+        self.setStyleSheet(f"""
+            #compactionPanel {{
+                background: transparent; border: none;
+                font-family: "LXGW WenKai", "Microsoft YaHei UI";
+            }}
+            QLabel {{ background: transparent; color: {c['ink']}; }}
+            QLabel#compactionHead {{ color: {c['accent_deep']}; font-size: 14px; font-weight: 700; }}
+            QLabel#compactionTargetLabel {{ color: {c['sub_deep']}; font-size: 11px; }}
+            QLabel#compactionTargetInfo {{ color: {c['sub']}; font-size: 10px; padding-left: 2px; }}
+            QLabel#compactionMeta {{ color: {c['accent_deep']}; font-size: 11px; font-weight: 600; }}
+            QLabel#compactionSub {{ color: {c['sub']}; font-size: 10px; }}
+            QLabel#compactionFeedback {{ color: {c['pink']}; font-size: 11px; font-weight: 600; }}
+            QLabel#compactionText {{
+                background: {c['surface_alt']}; border-radius: 10px;
+                padding: 9px 11px; font-size: 12px; line-height: 1.6;
+            }}
+            QScrollArea#compactionScroll {{ background: transparent; border: none; }}
+            QScrollArea#compactionScroll > QWidget > QWidget {{ background: transparent; }}
+            QScrollBar:vertical {{ background: transparent; width: 6px; margin: 2px; }}
+            QScrollBar::handle:vertical {{ background: {c['border']}; border-radius: 3px; min-height: 20px; }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+            QPushButton#compactionCloseBtn {{
+                color: {c['sub']}; background: transparent; border: none;
+                border-radius: 12px; font-size: 13px;
+            }}
+            QPushButton#compactionCloseBtn:hover {{ background: {c['danger_bg']}; color: {c['pink']}; }}
+            QPushButton#compactionBtn {{
+                min-height: 28px; padding: 0 10px;
+                color: {c['accent_deep']}; background: {c['surface_alt']};
+                border: 1px solid {c['border']}; border-radius: 10px;
+                font-size: 11px; font-weight: 600;
+            }}
+            QPushButton#compactionBtn:hover {{ background: {c['surface']}; border-color: {c['accent']}; }}
+            QPushButton#compactionBtn:disabled {{ color: {c['sub']}; }}
+            QPushButton#compactionCopyBtn {{
+                min-height: 34px; color: {c['accent_text']}; background: {c['accent']};
+                border: 1px solid {c['accent']}; border-radius: 12px;
+                font-size: 12px; font-weight: 600;
+            }}
+            QPushButton#compactionCopyBtn:hover {{ background: {c['accent_deep']}; border-color: {c['accent_deep']}; }}
+            QPushButton#compactionCopyBtn:disabled {{
+                color: {c['sub']}; background: {c['surface_alt']}; border-color: {c['border']};
+            }}
+        """)
 
     def paintEvent(self, event):
         super().paintEvent(event)
