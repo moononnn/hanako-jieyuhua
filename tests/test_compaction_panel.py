@@ -77,6 +77,13 @@ def archive_payload(seq=1, *, count=3, index=0, compacted=True, entries=162, ses
 
 
 class CompactionPanelTests(QtTestCase):
+    def test_corner_close_button_present(self):
+        """二级窗右上角统一有 ✕，不能指望用户猜“点悬浮球才能关”。"""
+        panel = make_panel()
+        closers = [b for b in panel.findChildren(zhujian.QPushButton) if b.text() == "✕"]
+        self.assertEqual(len(closers), 1, "压缩档案窗右上角要有一个 ✕")
+        self.assertIs(closers[0], panel.btn_close)
+        panel.close()
     def test_construct_defaults(self):
         panel = make_panel()
         self.assertEqual(panel.lbl_head.text(), "压缩档案")

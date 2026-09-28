@@ -76,6 +76,14 @@ def fake_audio_b64():
 
 
 class ReadPanelTests(QtTestCase):
+    def test_no_corner_close_button(self):
+        """二级窗右上角统一有 ✕，不能指望用户猜“点悬浮球才能关”。"""
+        panel = make_panel()
+        closers = [b for b in panel.findChildren(zhujian.QPushButton) if b.text() == "✕"]
+        self.assertEqual(len(closers), 1, "朗读窗右上角要有一个 ✕")
+        self.assertIs(closers[0], panel.btn_close)
+        panel.close()
+
     def test_construct_defaults(self):
         rp = make_panel()
         self.assertIn("助手", rp.lbl_head.text())

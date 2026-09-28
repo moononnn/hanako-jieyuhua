@@ -91,6 +91,14 @@ def pump(app, seconds=0.05):
 
 
 class PolishPanelTests(QtTestCase):
+    def test_corner_close_button_present(self):
+        """二级窗右上角统一有 ✕，不能指望用户猜“点悬浮球才能关”。"""
+        _ball, p = make_panel()
+        closers = [b for b in p.findChildren(zhujian.QPushButton) if b.text() == "✕"]
+        self.assertEqual(len(closers), 1, "捋一捋窗右上角要有一个 ✕")
+        self.assertIs(closers[0], p.btn_close)
+        p.close()
+
     def test_construct_defaults(self):
         ball, p = make_panel()
         self.assertIn("帮我捋捋", p.lbl_head.text())

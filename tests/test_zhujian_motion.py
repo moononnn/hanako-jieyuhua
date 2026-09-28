@@ -9,6 +9,34 @@ from _zhujian_test_support import MODULE_PATH, QtTestCase, _APP, zhujian
 
 
 class ZhujianMotionTests(QtTestCase):
+    def test_popup_opens_toward_screen_center_on_ball_half(self):
+        # 球在右半屏 → 往左开（朝屏幕中间）
+        x, _y, side = zhujian.position_popup_away_from_wall(
+            (500, 300, 80, 80), (344, 440), (0, 0, 800, 800),
+        )
+        self.assertEqual(side, "left")
+        self.assertEqual(x, 148)
+        # 球在左半屏 → 往右开，不再压到屏幕左边
+        x, _y, side = zhujian.position_popup_away_from_wall(
+            (100, 300, 80, 80), (344, 440), (0, 0, 800, 800),
+        )
+        self.assertEqual(side, "right")
+        self.assertEqual(x, 188)
+
+    def test_popup_falls_back_when_preferred_side_has_no_room(self):
+        # 球在左半屏但右边放不下（球快贴着右边缘）→ 改开左边，并夹在屏幕内
+        x, _y, side = zhujian.position_popup_away_from_wall(
+            (700, 300, 80, 80), (344, 440), (0, 0, 800, 800),
+        )
+        self.assertEqual(side, "left")
+        self.assertEqual(x, 348)
+        # 球在右半屏但左边放不下 → 改开右边
+        x, _y, side = zhujian.position_popup_away_from_wall(
+            (10, 300, 80, 80), (344, 440), (0, 0, 800, 800),
+        )
+        self.assertEqual(side, "right")
+        self.assertEqual(x, 98)
+
     def test_popup_placement_prefers_left_even_when_previous_side_was_right(self):
         x, _y, side = zhujian.position_popup_left_first(
             (500, 300, 80, 80),
@@ -403,7 +431,9 @@ class ZhujianMotionTests(QtTestCase):
         self.assertEqual(menu.btn_polish.text(), "捋一捋")
         self.assertEqual(menu.lbl_compaction_title.text(), "压缩档案")
         self.assertEqual(menu.btn_compaction.text(), "查看档案")
-        self.assertEqual(len(menu.findChildren(zhujian.QFrame, "toolRow")), 5)
+        self.assertEqual(menu.lbl_qi_title.text(), "等 ta 说完再发")
+        self.assertEqual(menu.btn_queue_insert.text(), "写一句")
+        self.assertEqual(len(menu.findChildren(zhujian.QFrame, "toolRow")), 6)
 
         menu.lbl_cache_time.setText("上次生成 10:38")
         menu.show()
@@ -515,9 +545,9 @@ class ZhujianMotionTests(QtTestCase):
             self.assertLessEqual(menu.btn_rename.geometry().right(), menu.rename_tool.width())
             self.assertLessEqual(menu.btn_undo.geometry().right(), menu.rename_tool.width())
             self.assertGreater(menu.btn_undo.geometry().y(), menu.btn_rename.geometry().y())
-            # 新增第 5 个工具行（压缩档案）后，窄面板下的高度预算更紧：主面板真实宽度固定 344，
-            # 280 只作压力档，验证两个按钮仍在行内、还原在生成下方（布局没塌）。
-            min_height = 84 if width >= 344 else 76
+            # 新增第 5 个工具行（压缩档案）、第 6 个（排队插话）后，窄面板下的高度预算更紧：
+            # 主面板真实宽度固定 344，280 只作压力档，验证两个按钮仍在行内、还原在生成下方（布局没塌）。
+            min_height = 84 if width >= 344 else 66
             self.assertGreaterEqual(menu.rename_tool.height(), min_height)
         menu.close()
         ball.close()
