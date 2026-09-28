@@ -45,7 +45,7 @@ from PyQt6.QtGui import (
 from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QPushButton, QLabel, QFrame, QLineEdit, QPlainTextEdit, QScrollArea,
-    QVBoxLayout, QHBoxLayout, QGridLayout, QSizePolicy,
+    QTextEdit, QVBoxLayout, QHBoxLayout, QGridLayout, QSizePolicy,
 )
 
 # 语音朗读播放（PyQt6 自带 QtMultimedia；缺失时按钮给出提示，不硬崩）
@@ -354,8 +354,28 @@ def position_popup_beside(anchor_rect, popup_size, bounds, gap=8, anchor_ratio=0
     )
 
 
+def position_popup_away_from_wall(anchor_rect, popup_size, bounds, gap=8, anchor_ratio=0.5):
+    """按花杂所在的半屏选边：球在左半屏就往右开、右半屏往左开，
+    永远朝屏幕中间走（不贴边、不压球）；首选那侧放不下才换边。返回 (x, y, side)。"""
+    ax, _ay, aw, _ah = anchor_rect
+    pw, ph = popup_size
+    left, top, right, bottom = bounds
+    left_x = ax - pw - gap
+    right_x = ax + aw + gap
+    prefer_right = (ax + aw // 2) < (left + right) // 2
+    if prefer_right:
+        x, side = (right_x, "right") if right_x + pw <= right else (left_x, "left")
+    else:
+        x, side = (left_x, "left") if left_x >= left else (right_x, "right")
+    return (
+        max(left, min(x, right - pw)),
+        popup_anchor_y(anchor_rect, ph, bounds, anchor_ratio),
+        side,
+    )
+
+
 def position_popup_left_first(anchor_rect, popup_size, bounds, gap=8, anchor_ratio=0.5):
-    """优先放锚点左侧，左侧放不下才放右侧；返回 (x, y, side)。"""
+    """旧规则：优先放锚点左侧，左侧放不下才放右侧；返回 (x, y, side)。保留作对照。"""
     ax, _ay, aw, ah = anchor_rect
     pw, ph = popup_size
     left, top, right, bottom = bounds
@@ -919,7 +939,19 @@ class AskFlowerDialog(FadeOnLeaveMixin, QFrame):
 
         title = QLabel("❓ 问问小花")
         title.setObjectName("menuTitle")
-        root.addWidget(title)
+        head = QHBoxLayout()
+        head.setSpacing(6)
+        head.addWidget(title)
+        head.addStretch(1)
+        # 同其他二级窗：右上角 ✕ 关窗
+        self.btn_head_close = QPushButton("✕")
+        self.btn_head_close.setObjectName("askCloseBtn")
+        self.btn_head_close.setFixedSize(22, 22)
+        self.btn_head_close.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_head_close.setToolTip("关掉这个窗口")
+        self.btn_head_close.clicked.connect(self.close)
+        head.addWidget(self.btn_head_close)
+        root.addLayout(head)
         subtitle = QLabel("想问 Hana 使用上的问题？点这里问问小花，基于 Hana 内置的 user-guide 说明书 skill，帮你更方便地解答")
         subtitle.setObjectName("menuSub")
         subtitle.setWordWrap(True)
@@ -1025,6 +1057,11 @@ class AskFlowerDialog(FadeOnLeaveMixin, QFrame):
             QLabel {{ background: transparent; color: {c['ink']}; }}
             QLabel#menuTitle {{ font-size: 14px; font-weight: 700; color: {c['accent_deep']}; }}
             QLabel#menuSub {{ font-size: 10px; color: {c['sub']}; padding-bottom: 2px; }}
+            QPushButton#askCloseBtn {{
+                color: {c['sub']}; background: transparent; border: none;
+                border-radius: 11px; font-size: 13px;
+            }}
+            QPushButton#askCloseBtn:hover {{ background: {c['danger_bg']}; color: {c['pink']}; }}
             QLineEdit#askFlowerInput {{
                 min-height: 30px; padding: 0 10px;
                 color: {c['ink']}; background: {c['surface']};
@@ -1059,13 +1096,14 @@ class AskFlowerDialog(FadeOnLeaveMixin, QFrame):
             QPushButton#askFlowerSend:disabled {{ background: {c['border']}; }}
         """)
 
-    def show_near_ball(self):
+    def move_to_ball(self):
+        """只按花朵重新定位：回答区撑高后挪位置，不重新 show、不抢焦点。"""
         self.apply_theme()
         self.adjustSize()
         ball = self.ball
         screen = ball.screen() or QApplication.primaryScreen()
         geo = screen.availableGeometry()
-        x, y, side = position_popup_left_first(
+        x, y, side = position_popup_away_from_wall(
             (ball.x(), ball.y(), ball.width(), ball.height()),
             (self.width(), self.height()),
             (geo.left(), geo.top(), geo.right() + 1, geo.bottom() + 1),
@@ -1075,6 +1113,9 @@ class AskFlowerDialog(FadeOnLeaveMixin, QFrame):
         self.side = side
         self._user_dragged = False
         self.move(x, y)
+
+    def show_near_ball(self):
+        self.move_to_ball()
         self.show()
         self.raise_()
         self.input.setFocus()
@@ -1089,7 +1130,7 @@ class AskFlowerDialog(FadeOnLeaveMixin, QFrame):
             y = max(geo.top(), min(self.y(), geo.bottom() - self.height() + 1))
             self.move(x, y)
         else:
-            self.show_near_ball()
+            self.move_to_ball()
 
     # ── 双窗拖动：按住空白处，面板与花朵保持相对距离一起动（与朗读弹窗一致） ──
     def mousePressEvent(self, e):
@@ -1223,6 +1264,668 @@ class AskFlowerDialog(FadeOnLeaveMixin, QFrame):
 
 
 # ─────────────────────────────
+#  排队插话输入弹窗（主面板「写一句」→ 写一句话，排队等当前回合结束再发）
+# ─────────────────────────────
+class QueueInsertDialog(FadeOnLeaveMixin, QFrame):
+    """写一句想对当前伙伴说的话，POST /queue-insert 写入队列。
+    不当场打断：队列由 Node 侧 QueueInsertManager 等这一轮回复结束后自动送达。
+    样式与行为对齐 AskFlowerDialog / ReadPanel（同套二级弹窗规范）。"""
+
+    target_ready = pyqtSignal(object)
+    QI_POLL_MS = 1000
+
+    def __init__(self, ball):
+        super().__init__(None)
+        self.ball = ball
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+            | Qt.WindowType.NoDropShadowWindowHint
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setObjectName("queueInsertDialog")
+        self.setFixedWidth(268)
+        # 与朗读/问问小花同一套双窗拖动：面板与花朵保持相对距离一起动
+        self._drag_press = None
+        self._drag_panel_start = None
+        self._drag_ball_start = None
+        self._drag_moved = False
+        self._user_dragged = False
+        self.side = "left"
+        self._watched_id = ""
+        self._queued_session_path = ""
+        self._watched_mismatch = 0
+        self._queued = False
+        self._poll_seq = 0
+        self._target_seq = 0
+        # 有没有真正拿到过 /target 的回包：没有才显示「正在读取」，拿到了还是空就是真没目标
+        self._target_known = False
+        self.target_ready.connect(self._apply_target_state)
+        self.target_menu_title = "排到哪段对话？"
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(14, 13, 14, 12)
+        root.setSpacing(7)
+
+        title = QLabel("💬 等 ta 说完再发")
+        title.setObjectName("menuTitle")
+        head = QHBoxLayout()
+        head.setSpacing(6)
+        head.addWidget(title)
+        head.addStretch(1)
+        # 二级窗统一都有右上角 ✕：不用猜“点球才能关”，两个入口都留着
+        self.btn_head_close = QPushButton("✕")
+        self.btn_head_close.setObjectName("qiCloseBtn")
+        self.btn_head_close.setFixedSize(22, 22)
+        self.btn_head_close.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_head_close.setToolTip("关掉这个窗口（写好的话还在，重开接着写）")
+        self.btn_head_close.clicked.connect(self.close)
+        head.addWidget(self.btn_head_close)
+        root.addLayout(head)
+        subtitle = QLabel("ta 正在回复，这句先存着，这一轮结束就自动发出去")
+        subtitle.setObjectName("menuSub")
+        subtitle.setWordWrap(True)
+        root.addWidget(subtitle)
+
+        target_row = QHBoxLayout()
+        target_row.setSpacing(6)
+        self.lbl_target_label = QLabel("发送到")
+        self.lbl_target_label.setObjectName("qiTargetLabel")
+        target_row.addWidget(self.lbl_target_label)
+        self.btn_target = QPushButton("跟随最近 ▾")
+        self.btn_target.setObjectName("qiTargetBtn")
+        self.btn_target.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_target.setToolTip("排进哪段对话：默认跟随最近活跃，也可以自己固定一段")
+        self.btn_target.clicked.connect(self._open_target_menu)
+        target_row.addWidget(self.btn_target)
+        target_row.addStretch(1)
+        root.addLayout(target_row)
+
+        self.lbl_target_info = QLabel("")
+        self.lbl_target_info.setObjectName("qiTargetInfo")
+        self.lbl_target_info.setWordWrap(True)
+        root.addWidget(self.lbl_target_info)
+
+        self.target_menu = TargetMenu(self)
+        self.target_menu.hide()
+        root.addWidget(self.target_menu)
+
+        self.input = QTextEdit()
+        self.input.setObjectName("queueInsertInput")
+        self.input.setPlaceholderText("比如：那我们先吃饭，回头再聊这个？")
+        self.input.setFixedHeight(64)
+        self.input.setAcceptRichText(False)
+        # 输入框有焦点时保持不透明（手在键盘上时鼠标不在窗内，不该淡出）
+        self.input._qi_orig_focus_in = self.input.focusInEvent
+        self.input._qi_orig_focus_out = self.input.focusOutEvent
+        self.input.focusInEvent = self._on_input_focus_in
+        self.input.focusOutEvent = self._on_input_focus_out
+        root.addWidget(self.input)
+
+        self.lbl_status = QLabel("")
+        self.lbl_status.setObjectName("qiStatus")
+        self.lbl_status.setWordWrap(True)
+        self.lbl_status.hide()
+        root.addWidget(self.lbl_status)
+
+        btns = QHBoxLayout()
+        btns.setSpacing(6)
+        self.btn_cancel = QPushButton("取消")
+        self.btn_cancel.setObjectName("queueInsertCancel")
+        self.btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_cancel.clicked.connect(self._cancel_or_close)
+        btns.addWidget(self.btn_cancel, 1)
+        self.btn_send = QPushButton("就这么发")
+        self.btn_send.setObjectName("queueInsertSend")
+        self.btn_send.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_send.clicked.connect(self._send)
+        btns.addWidget(self.btn_send, 1)
+        root.addLayout(btns)
+
+        self.poll_timer = QTimer(self)
+        self.poll_timer.setInterval(self.QI_POLL_MS)
+        self.poll_timer.timeout.connect(self._poll_state)
+
+        self.apply_theme()
+        self.setup_fade_on_leave()
+
+    # ── 发送目标：复用一级左键面板的跟随最近 / 自己选择 ──
+    def _current_target_path(self):
+        if self.ball.target_mode == "pinned" and self.ball.pinned_target:
+            return str(self.ball.pinned_target.get("sessionPath") or "")
+        return ""
+
+    def _update_target(self):
+        arrow = "▴" if self.target_menu.isVisible() else "▾"
+        if self.ball.target_mode == "pinned" and self.ball.pinned_target:
+            title = (self.ball.target_title or self.ball.pinned_target.get("title") or "").strip()
+            label = f"固定 · {title[:8]}" if title else "固定"
+        else:
+            label = "跟随最近"
+        self.btn_target.setText(f"{label} {arrow}")
+        self._update_target_info()
+
+    def _update_target_info(self):
+        name = (self.ball.target_name or "").strip()
+        if self.ball.target_mode == "pinned" and self.ball.pinned_target:
+            title = (self.ball.target_title or self.ball.pinned_target.get("title") or "").strip()
+            prefix = "固定对话"
+        else:
+            title = (self.ball.target_title or "").strip()
+            prefix = "跟随最近"
+        if title:
+            text = " · ".join([prefix, name, title]) if name else " · ".join([prefix, title])
+        elif name:
+            text = " · ".join([prefix, name]) + "（对话暂无标题）"
+        elif not self._target_known:
+            text = "正在读取当前最近的对话框…"
+        else:
+            text = "没找到活跃的对话，可以用下面的「自己选择」挑一段"
+        self.lbl_target_info.setText(text)
+
+    def _open_target_menu(self):
+        if self._queued:
+            return
+        show = not self.target_menu.isVisible()
+        self._set_target_selector_visible(show)
+        if show:
+            self.target_menu.begin_browse()
+            self.target_menu.refresh_sessions_async()
+
+    def _set_target_selector_visible(self, visible):
+        self.target_menu.setVisible(bool(visible) and not self._queued)
+        self._update_target()
+        self._resize_after_target_change()
+
+    def invalidate_target_sync(self):
+        self._poll_seq += 1
+
+    def _sync_target_state(self):
+        self._target_seq += 1
+        target_seq = self._target_seq
+        target_revision = getattr(self.ball, "target_revision", 0)
+
+        def worker():
+            try:
+                data = api_get("/target", timeout=4)
+                if data.get("ok"):
+                    self.target_ready.emit({
+                        **data,
+                        "seq": target_seq,
+                        "target_revision": target_revision,
+                    })
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, daemon=True, name="zhujian-queue-target").start()
+
+    def _apply_target_state(self, data):
+        if data.get("seq") != self._target_seq:
+            return
+        if data.get("target_revision", getattr(self.ball, "target_revision", 0)) != getattr(self.ball, "target_revision", 0):
+            return
+        target = data.get("target") or {}
+        self._target_known = True
+        self.ball.target_name = target.get("name") or target.get("agentId") or ""
+        self.ball.target_title = target.get("title") or ""
+        self.ball.target_mode = "pinned" if data.get("mode") == "pinned" else "auto"
+        self.ball.pinned_target = data.get("pinned")
+        self._update_target()
+
+    def _on_target_changed(self):
+        self._queued_session_path = ""
+        # 先把「已拿到目标」清掉再刷界面：切目标后名字被清空的那一瞬应该显示正在定位，
+        # 而不是先摆一句「没找到活跃的对话」再跳回去
+        self._target_known = False
+        self._update_target()
+        # 切目标后全局名字被清空，必须重新拉一次 /target，
+        # 否则「跟随最近」会永远停在「正在读取当前最近的对话框…」
+        self._sync_target_state()
+        self._refresh_state()
+
+    def _resize_after_target_change(self):
+        QTimer.singleShot(0, self._reanchor)
+
+    def _flash(self, text):
+        self._set_status(text, "normal")
+
+    # ── 淡出与拖动：与 AskFlowerDialog 同款 ──
+    def enterEvent(self, event):
+        super().enterEvent(event)
+        self._on_fade_enter()
+
+    def leaveEvent(self, event):
+        super().leaveEvent(event)
+        self._on_fade_leave()
+
+    def _on_input_focus_in(self, event):
+        self._fade_out_timer.stop()
+        self._fade_to(1.0, FADE_IN_DURATION_MS)
+        orig = getattr(self.input, "_qi_orig_focus_in", None)
+        if orig is not None:
+            orig(event)
+
+    def _on_input_focus_out(self, event):
+        if self._fade_allowed() and not self._cursor_inside():
+            self._fade_out_timer.start(FADE_OUT_DELAY_MS)
+        orig = getattr(self.input, "_qi_orig_focus_out", None)
+        if orig is not None:
+            orig(event)
+
+    def _fade_allowed(self):
+        return not self.input.hasFocus()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._reset_fade_on_show()
+        self.target_menu.hide()
+        self._update_target()
+        self._sync_target_state()
+        self.input.setFocus()
+        self._refresh_state()
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self._cancel_fade()
+        self.poll_timer.stop()
+        self._poll_seq += 1
+        try:
+            self.ball._set_fusion_panel_state("none")
+        except Exception:
+            pass
+
+    def _set_status(self, text, tone="normal"):
+        self.lbl_status.setText(text or "")
+        if not text:
+            self.lbl_status.hide()
+        else:
+            self.lbl_status.setProperty("tone", tone)
+            self.lbl_status.style().unpolish(self.lbl_status)
+            self.lbl_status.style().polish(self.lbl_status)
+            self.lbl_status.show()
+        self.adjustSize()
+        self._reanchor()
+
+    def _set_queued(self, queued):
+        self._queued = bool(queued)
+        self.input.setReadOnly(self._queued)
+        self.btn_send.setEnabled(not self._queued)
+        self.btn_target.setEnabled(not self._queued)
+        # 句已存进队列时不让随手关窗：关窗不撤队，容易让人以为不发了
+        if hasattr(self, "btn_head_close"):
+            self.btn_head_close.setEnabled(not self._queued)
+            self.btn_head_close.setToolTip(
+                "这句已经存进队列了，要拿回来得用左边的「先不发」" if self._queued
+                else "关掉这个窗口（写好的话还在，重开接着写）"
+            )
+        if self._queued:
+            self.target_menu.hide()
+        self.btn_cancel.setText("先不发" if self._queued else "取消")
+        self._update_target()
+
+    def _set_busy(self, busy, action="send"):
+        self.btn_send.setEnabled(not busy and not self._queued)
+        self.btn_cancel.setEnabled(not busy)
+        self.btn_target.setEnabled(not busy and not self._queued)
+        if busy:
+            self.target_menu.hide()
+            self._update_target()
+        self.input.setEnabled(not busy)
+        if busy and action == "cancel":
+            self.btn_cancel.setText("撤下来中…")
+        else:
+            self.btn_send.setText("存着…" if busy else "就这么发")
+            self.btn_cancel.setText("先不发" if self._queued else "取消")
+
+    def _cancel_or_close(self):
+        if not self._queued or not self._watched_id:
+            self.close()
+            return
+        watched_id = self._watched_id
+        self.poll_timer.stop()
+        self._poll_seq += 1  # 暂停轮询并作废旧回包，取消期间不能再读到旧 pending 把界面锁回去
+        self._set_busy(True, "cancel")
+        self._set_status("正在撤下来…", "normal")
+        state = {"result": None, "done": False}
+
+        def run():
+            try:
+                state["result"] = api_post("/queue-insert/cancel", {"id": watched_id}, timeout=10)
+            except urllib.error.HTTPError as e:
+                detail = ""
+                try:
+                    detail = (json.loads(e.read().decode("utf-8", "replace")) or {}).get("error") or ""
+                except Exception:
+                    detail = ""
+                state["result"] = {"ok": False, "error": detail or f"没能取消（{e}）"}
+            except Exception as e:
+                state["result"] = {"ok": False, "error": f"连不上解语花（{e}）"}
+            state["done"] = True
+
+        threading.Thread(target=run, daemon=True, name="queue-insert-cancel-worker").start()
+        timer = QTimer(self)
+        timer.setInterval(120)
+
+        def tick():
+            if not state["done"]:
+                return
+            timer.stop()
+            result = state["result"] or {}
+            self._poll_seq += 1  # 取消结果落定，再封一次取消期间可能已经在路上的旧回包
+            if result.get("ok"):
+                self._watched_id = ""
+                self._queued_session_path = ""
+                self._set_queued(False)
+                self._set_busy(False)
+                self._set_status("已撤下来，可以继续改", "normal")
+                self.input.setFocus()
+            else:
+                self._set_busy(False)
+                self._set_status(result.get("error") or "没能取消，再试一次", "warn")
+                if self._watched_id and not self.poll_timer.isActive():
+                    self.poll_timer.start()
+
+        timer.timeout.connect(tick)
+        timer.start()
+
+    def _send(self):
+        text = self.input.toPlainText().strip()
+        if not text:
+            self._set_status("写点什么再发嘛～", "warn")
+            return
+        # 点击这一刻就冻结目标；后台线程只能使用这份快照，不能晚一步再读已变化的全局选择。
+        target_path = self._current_target_path()
+        self._set_busy(True)
+        # 回包确认入队之后才能说“存好了”
+        self._set_status("正在存着…", "normal")
+
+        state = {"result": None, "done": False}
+
+        def run():
+            try:
+                state["result"] = api_post("/queue-insert", {
+                    "text": text,
+                    "sessionPath": target_path,
+                }, timeout=10)
+            except urllib.error.HTTPError as e:
+                detail = ""
+                try:
+                    detail = (json.loads(e.read().decode("utf-8", "replace")) or {}).get("error") or ""
+                except Exception:
+                    detail = ""
+                state["result"] = {"ok": False, "error": detail or f"没能存下（{e}）"}
+            except Exception as e:
+                state["result"] = {"ok": False, "error": f"连不上解语花（{e}），看看悬浮球还开着没"}
+            state["done"] = True
+
+        threading.Thread(target=run, daemon=True, name="queue-insert-worker").start()
+        timer = QTimer(self)
+        timer.setInterval(120)
+
+        def tick():
+            if not state["done"]:
+                return
+            timer.stop()
+            self._set_busy(False)
+            result = state["result"] or {}
+            if result.get("ok"):
+                self._watched_id = result.get("id") or ""
+                self._watched_mismatch = 0
+                self._queued_session_path = result.get("sessionPath") or self._current_target_path()
+                self._set_queued(True)
+                if result.get("duplicated"):
+                    self._set_status("这句已经在队列里了，这轮结束就发", "normal")
+                else:
+                    self._set_status("存好了，这轮结束就发", "ok")
+                if not self.poll_timer.isActive():
+                    self.poll_timer.start()
+            else:
+                self._set_status(result.get("error") or "没能存下，再试一次", "warn")
+
+        timer.timeout.connect(tick)
+        timer.start()
+
+    def _poll_state(self):
+        """轮询队列状态：等送达或作废后停下来，并给一句明确回音。"""
+        self._poll_seq += 1
+        poll_seq = self._poll_seq
+        state = {"result": None, "done": False}
+
+        def run():
+            try:
+                state["result"] = api_post("/queue-insert/state", {
+                    "sessionPath": self._queued_session_path or self._current_target_path(),
+                }, timeout=6)
+            except Exception:
+                state["result"] = None
+            state["done"] = True
+
+        threading.Thread(target=run, daemon=True, name="queue-insert-poll").start()
+        timer = QTimer(self)
+        timer.setInterval(150)
+
+        def tick():
+            if not state["done"]:
+                return
+            timer.stop()
+            if poll_seq != self._poll_seq:
+                return
+            data = state["result"] or {}
+            self._apply_state(data.get("state") or {})
+
+        timer.timeout.connect(tick)
+        timer.start()
+
+    def _refresh_state(self):
+        self._poll_state()
+
+    def _apply_state(self, info):
+        if not isinstance(info, dict):
+            return
+        state = info.get("state")
+        if self._watched_id and info.get("id") and info.get("id") != self._watched_id:
+            # 队列回报的编号对不上（队列被清过、换过条目、旧状态才回来）：
+            # 不能就这么干等着，连着几次还对不上就当这条已经不在队列里，解锁界面而不是卡死在“存好了”。
+            if state in {"sent", "skipped", "empty"}:
+                self._watched_mismatch += 1
+                if self._watched_mismatch >= 3:
+                    self.poll_timer.stop()
+                    self._watched_id = ""
+                    self._queued_session_path = ""
+                    self._set_queued(False)
+                    self._set_status("这句话已经不在队列里了", "warn")
+            return
+        self._watched_mismatch = 0
+        if state == "pending":
+            self._watched_id = info.get("id") or self._watched_id
+            self._queued_session_path = info.get("sessionPath") or self._queued_session_path or self._current_target_path()
+            if info.get("text"):
+                self.input.setPlainText(info.get("text"))
+            self._set_queued(True)
+            self._set_status("在等着，这轮结束就发", "normal")
+        elif state == "sending":
+            self._watched_id = info.get("id") or self._watched_id
+            self._queued_session_path = info.get("sessionPath") or self._queued_session_path or self._current_target_path()
+            if info.get("text"):
+                self.input.setPlainText(info.get("text"))
+            self._set_queued(True)
+            self._set_status("正在送过去…", "normal")
+        elif state in {"sent", "skipped"} and not self._watched_id:
+            return  # 初次打开只接管活队列，不能让历史终态清掉用户刚写的新草稿
+        elif state == "sent":
+            self.poll_timer.stop()
+            self._watched_id = ""
+            self._queued_session_path = ""
+            self._set_queued(False)
+            self.input.clear()
+            self._set_status("发出去了，ta 应该已经看到", "ok")
+        elif state == "skipped":
+            self.poll_timer.stop()
+            self._watched_id = ""
+            self._queued_session_path = ""
+            self._set_queued(False)
+            self._set_status(info.get("reason") or "这句这次没发出去", "warn")
+        elif state == "empty" and self._watched_id:
+            self.poll_timer.stop()
+            self._watched_id = ""
+            self._queued_session_path = ""
+            self._set_queued(False)
+            self._set_status("这句话已经不在队列里了", "warn")
+
+    # ── 定位 ──
+    def move_to_ball(self):
+        """只按花朵重新定位：内容变长变短时挪位置，不重新 show、不抢输入焦点。"""
+        self.apply_theme()
+        self.adjustSize()
+        ball = self.ball
+        screen = ball.screen() or QApplication.primaryScreen()
+        geo = screen.availableGeometry()
+        x, y, side = position_popup_away_from_wall(
+            (ball.x(), ball.y(), ball.width(), ball.height()),
+            (self.width(), self.height()),
+            (geo.left(), geo.top(), geo.right() + 1, geo.bottom() + 1),
+            gap=8,
+            anchor_ratio=PANEL_ANCHOR_RATIO,
+        )
+        self.side = side
+        self._user_dragged = False
+        self.move(x, y)
+
+    def show_near_ball(self):
+        self.move_to_ball()
+        self.show()
+        self.raise_()
+        self.input.setFocus()
+
+    def _reanchor(self):
+        """状态文案变长变短后重新定位：没拖过按球锚定，拖过保持原位不跳。"""
+        self.adjustSize()
+        if self._user_dragged:
+            screen = self.ball.screen() or QApplication.primaryScreen()
+            geo = screen.availableGeometry()
+            x = max(geo.left(), min(self.x(), geo.right() - self.width() + 1))
+            y = max(geo.top(), min(self.y(), geo.bottom() - self.height() + 1))
+            self.move(x, y)
+        else:
+            self.move_to_ball()
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self._drag_press = e.globalPosition().toPoint()
+            self._drag_panel_start = self.pos()
+            self._drag_ball_start = self.ball.pos()
+            self._drag_moved = False
+            reset_motion = getattr(self.ball, "_reset_drag_motion", None)
+            if callable(reset_motion):
+                reset_motion()
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):
+        if self._drag_press is not None and (e.buttons() & Qt.MouseButton.LeftButton):
+            cur = e.globalPosition().toPoint()
+            delta = cur - self._drag_press
+            if not self._drag_moved:
+                if delta.manhattanLength() < QApplication.startDragDistance():
+                    return
+                self._drag_moved = True
+                self._user_dragged = True
+            screen = self.ball.screen() or QApplication.primaryScreen()
+            geo = screen.availableGeometry()
+            dx = max(geo.left() - self._drag_panel_start.x(), min(delta.x(), geo.right() - self.width() + 1 - self._drag_panel_start.x()))
+            dy = max(geo.top() - self._drag_panel_start.y(), min(delta.y(), geo.bottom() - self.height() + 1 - self._drag_panel_start.y()))
+            self.move(self._drag_panel_start + QPoint(dx, dy))
+            self.ball.move(self._drag_ball_start + QPoint(dx, dy))
+            record_motion = getattr(self.ball, "_record_drag_motion", None)
+            if callable(record_motion):
+                record_motion()
+        super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            if self._drag_moved:
+                release_motion = getattr(self.ball, "_release_drag_motion", None)
+                if callable(release_motion):
+                    release_motion()
+                try:
+                    self.ball._save_pos()
+                except Exception:
+                    pass
+            self._drag_press = None
+            self._drag_panel_start = None
+            self._drag_ball_start = None
+        super().mouseReleaseEvent(e)
+
+    def apply_theme(self):
+        c = THEME_COLORS[self.ball.theme_mode]
+        self.setStyleSheet(f"""
+            #queueInsertDialog {{
+                background: transparent; border: none;
+                font-family: "LXGW WenKai", "Microsoft YaHei UI";
+            }}
+            QLabel {{ background: transparent; color: {c['ink']}; }}
+            QLabel#menuTitle {{ font-size: 14px; font-weight: 700; color: {c['accent_deep']}; }}
+            QLabel#menuSub {{ font-size: 10px; color: {c['sub']}; padding-bottom: 2px; }}
+            QLabel#qiTargetLabel {{ color: {c['sub_deep']}; font-size: 11px; }}
+            QLabel#qiTargetInfo {{ color: {c['sub']}; font-size: 10px; padding-left: 2px; }}
+            QPushButton#qiTargetBtn {{
+                min-height: 28px; padding: 0 10px;
+                color: {c['accent_deep']}; background: {c['surface_alt']};
+                border: 1px solid {c['border']}; border-radius: 9px;
+                font-size: 11px; font-weight: 600;
+            }}
+            QPushButton#qiTargetBtn:hover {{ background: {c['surface']}; border-color: {c['accent']}; }}
+            QPushButton#qiTargetBtn:disabled {{ color: {c['sub']}; background: {c['surface_alt']}; }}
+            QLabel#qiStatus {{ font-size: 11px; color: {c['sub']}; }}
+            QPushButton#qiCloseBtn {{
+                color: {c['sub']}; background: transparent; border: none;
+                border-radius: 11px; font-size: 13px;
+            }}
+            QPushButton#qiCloseBtn:hover {{ background: {c['danger_bg']}; color: {c['pink']}; }}
+            QPushButton#qiCloseBtn:disabled {{ color: {c['border']}; background: transparent; }}
+            QLabel#qiStatus[tone="ok"] {{ color: {c['accent_deep']}; font-weight: 700; }}
+            QLabel#qiStatus[tone="warn"] {{ color: {c['pink']}; }}
+            QTextEdit#queueInsertInput {{
+                padding: 7px 9px;
+                color: {c['ink']}; background: {c['surface']};
+                border: 1px solid {c['border']}; border-radius: 9px; font-size: 12px;
+            }}
+            QTextEdit#queueInsertInput:focus {{ border-color: {c['accent']}; }}
+            QPushButton {{ min-height: 28px; border-radius: 9px; font-size: 11px; }}
+            QPushButton#queueInsertCancel {{
+                color: {c['sub']}; background: transparent; border: 1px solid {c['border']};
+            }}
+            QPushButton#queueInsertCancel:hover {{ background: {c['surface_alt']}; }}
+            QPushButton#queueInsertSend {{
+                color: {c['panel']}; background: {c['accent_deep']}; border: none; font-weight: 700;
+            }}
+            QPushButton#queueInsertSend:hover {{ background: {c['accent']}; }}
+            QPushButton#queueInsertSend:disabled {{ background: {c['border']}; }}
+            QScrollBar:vertical {{ background: transparent; width: 8px; margin: 0; }}
+            QScrollBar::handle:vertical {{ min-height: 26px; background: #c9dfd3; border-radius: 4px; }}
+            QScrollBar::handle:vertical:hover {{ background: {c['accent']}; }}
+            QScrollBar:horizontal {{ background: transparent; height: 8px; margin: 0; }}
+            QScrollBar::handle:horizontal {{ min-width: 26px; background: #c9dfd3; border-radius: 4px; }}
+            QScrollBar::handle:horizontal:hover {{ background: {c['accent']}; }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical,
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ height: 0; width: 0; }}
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical,
+            QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{ background: transparent; }}
+        """)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        c = THEME_COLORS[self.ball.theme_mode]
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QColor(c["border"]))
+        painter.setBrush(QColor(c["panel"]))
+        painter.drawRoundedRect(self.rect().adjusted(1, 1, -1, -1), 16, 16)
+        painter.end()
+
+
+# ─────────────────────────────
 #  推荐目标选择浮签（面板右上角下拉）
 # ─────────────────────────────
 class TargetMenu(QFrame):
@@ -1240,6 +1943,8 @@ class TargetMenu(QFrame):
         self.sessions_error = ""
         self._request_seq = 0
         self.view_mode = "pinned" if self.ball.target_mode == "pinned" else "auto"
+        # 用户点过「自己选择」后置位：这时列表正被浏览，/sessions 回包不能把视图弹回「跟随最近」
+        self._view_locked = False
         self.sessions_ready.connect(self._apply_sessions)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setObjectName("targetMenu")
@@ -1329,12 +2034,13 @@ class TargetMenu(QFrame):
         self.btn_fixed.style().unpolish(self.btn_fixed)
         self.btn_fixed.style().polish(self.btn_fixed)
         self.lbl_mode_hint.setText(
-            "跟随最近活跃的对话" if auto_on
-            else "从下面最近活跃的 5 个对话中固定一个"
+            ("跟随最近活跃的对话" if auto_on
+             else "从下面最近活跃的 5 个对话中固定一个")
+            + ("（正在刷新…）" if self.loading_sessions and self.sessions else "")
         )
         self.list_host.setVisible(not auto_on)
         self._clear_list()
-        if self.loading_sessions:
+        if self.loading_sessions and not self.sessions:
             lbl = QLabel("正在读取对话列表…")
             lbl.setObjectName("menuSub")
             lbl.setStyleSheet(f"color: {THEME_COLORS[self.ball.theme_mode]['sub']}; font-size: 11px;")
@@ -1376,6 +2082,7 @@ class TargetMenu(QFrame):
 
     def _show_fixed(self):
         self.view_mode = "pinned"
+        self._view_locked = True
         self._sync_ui()
         self.panel._resize_after_target_change()
 
@@ -1449,7 +2156,7 @@ class TargetMenu(QFrame):
         def worker():
             payload = {"seq": request_seq, "target_revision": target_revision, "sessions": [], "mode": self.ball.target_mode, "pinned": self.ball.pinned_target, "error": "读取失败，可以重新读取"}
             try:
-                data = api_get("/sessions", timeout=5)
+                data = api_get("/sessions", timeout=10)
                 if data.get("ok"):
                     payload = {
                         "seq": request_seq,
@@ -1482,10 +2189,20 @@ class TargetMenu(QFrame):
                 pinned = self.ball.pinned_target
                 self.ball.target_name = pinned.get("agentName") or pinned.get("name") or pinned.get("agentId") or self.ball.target_name
                 self.ball.target_title = pinned.get("title") or self.ball.target_title
-            self.view_mode = "pinned" if self.ball.target_mode == "pinned" else "auto"
+            # 用户正在「自己选择」里挑列表时保持列表展开，不要被回包重置成「跟随最近」
+            if not self._view_locked:
+                self.view_mode = "pinned" if self.ball.target_mode == "pinned" else "auto"
         self.apply_theme()
         self.panel._update_target()
         self.panel._resize_after_target_change()
+
+    def begin_browse(self):
+        """真正展开选择器时调用：按服务端真实目标定视图并解除浏览锁。
+        展开期间的重新读取（包括失败后点「↻ 重新读取」）不再动它，
+        所以用户点开的「自己选择」不会被回包弹回「跟随最近」。"""
+        self._view_locked = False
+        self.view_mode = "pinned" if self.ball.target_mode == "pinned" else "auto"
+        self._sync_ui()
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -1603,17 +2320,20 @@ class ZhujianBall(QWidget):
         self._drag_ask_was_visible = False
         self._drag_polish_was_visible = False
         self._drag_compaction_was_visible = False
+        self._drag_qi_was_visible = False
         self._drag_menu_start = None
         self._drag_read_start = None
         self._drag_ask_start = None
         self._drag_polish_start = None
         self._drag_compaction_start = None
+        self._drag_qi_start = None
         self._drag_ball_start = None
         self.menu = None
         self.read_panel = None        # 独立朗读窗口（由主面板「念给我听」打开）
         self.ask_flower_dialog = None  # 「问问小花」输入弹窗（右键浮签打开，懒创建）
         self.polish_panel = None      # 「帮我捋捋」弹窗（由主面板「捋一捋」打开，二级）
         self.compaction_panel = None  # 「压缩档案」弹窗（由主面板打开，二级；只读）
+        self.queue_insert_dialog = None  # 「排队插话」输入弹窗（主面板打开，二级；只排队不打断）
         self._ask_poll_inflight = False
         self.ask_ready.connect(self._apply_ask_payload)
         # 右键浮签不再是 Popup（Popup 会抢在 toggle 前自动关闭，无法实现"再按一次右键收起"），
@@ -1820,6 +2540,8 @@ class ZhujianBall(QWidget):
             self.polish_panel.update()
         if self.compaction_panel is not None:
             self.compaction_panel.apply_theme()
+        if self.queue_insert_dialog is not None:
+            self.queue_insert_dialog.apply_theme()
             self.compaction_panel.update()
 
     # ── SVG 渲染 ──
@@ -1871,7 +2593,7 @@ class ZhujianBall(QWidget):
         save_state(self.state)
 
     def _set_fusion_panel_state(self, panel):
-        panel = panel if panel in {"none", "menu", "ask", "read", "polish", "compaction"} else "none"
+        panel = panel if panel in {"none", "menu", "ask", "read", "polish", "compaction", "queue_insert"} else "none"
         if self.state.get("fusionPanel") == panel:
             return
         self.state["fusionPanel"] = panel
@@ -2390,6 +3112,14 @@ class ZhujianBall(QWidget):
             self._drag_compaction_start = (
                 self.compaction_panel.pos() if self._drag_compaction_was_visible else None
             )
+            # 排队插话窗同样是二级弹窗：球被单独拖动时它也要跟着走
+            self._drag_qi_was_visible = bool(
+                self.queue_insert_dialog is not None
+                and self.queue_insert_dialog.isVisible()
+            )
+            self._drag_qi_start = (
+                self.queue_insert_dialog.pos() if self._drag_qi_was_visible else None
+            )
             self._drag_ball_start = self.pos()
             self._press_global = e.globalPosition().toPoint()
             self._drag = self._press_global - self.pos()
@@ -2408,7 +3138,7 @@ class ZhujianBall(QWidget):
                 self._moved = True
                 self._cancel_press_for_drag()
             delta = current - self._press_global
-            if self._drag_menu_was_visible or self._drag_read_was_visible or self._drag_ask_was_visible or self._drag_polish_was_visible or self._drag_compaction_was_visible:
+            if self._drag_menu_was_visible or self._drag_read_was_visible or self._drag_ask_was_visible or self._drag_polish_was_visible or self._drag_compaction_was_visible or self._drag_qi_was_visible:
                 self._sync_dragged_popups(delta)
             else:
                 self.move(current - self._drag)
@@ -2435,11 +3165,13 @@ class ZhujianBall(QWidget):
             self._drag_ask_was_visible = False
             self._drag_polish_was_visible = False
             self._drag_compaction_was_visible = False
+            self._drag_qi_was_visible = False
             self._drag_menu_start = None
             self._drag_read_start = None
             self._drag_ask_start = None
             self._drag_polish_start = None
             self._drag_compaction_start = None
+            self._drag_qi_start = None
             self._drag_ball_start = None
         elif e.button() == Qt.MouseButton.RightButton:
             self._toggle_context_menu(e.globalPosition().toPoint())
@@ -2454,7 +3186,7 @@ class ZhujianBall(QWidget):
 
     def _sync_dragged_popups(self, desired_delta=None):
         """球被单独拖动时，让所有已打开的弹窗保持用户当前的相对位置。
-        可同时带多个：左键面板 / 朗读窗 / 问问小花弹窗。"""
+        可同时带多个：左键面板 / 朗读窗 / 问问小花弹窗 / 润色窗 / 压缩档案 / 排队插话窗。"""
         if self._drag_ball_start is None:
             return
         popups = []
@@ -2468,6 +3200,8 @@ class ZhujianBall(QWidget):
             popups.append((self.polish_panel, self._drag_polish_start))
         if self._drag_compaction_was_visible and self.compaction_panel is not None:
             popups.append((self.compaction_panel, self._drag_compaction_start))
+        if self._drag_qi_was_visible and self.queue_insert_dialog is not None:
+            popups.append((self.queue_insert_dialog, self._drag_qi_start))
         if not popups:
             return
         delta = desired_delta if desired_delta is not None else self.pos() - self._drag_ball_start
@@ -2528,6 +3262,11 @@ class ZhujianBall(QWidget):
         if self.compaction_panel is not None and self.compaction_panel.isVisible():
             self.compaction_panel.close()
             return
+        # 主面板没开，但排队插话窗开着：点球先收掉它，不展开面板（跟朗读/润色同款）。
+        # 排队的句子存在 Node 侧队列里，重新打开会按 /queue-insert/state 恢复，不会丢。
+        if self.queue_insert_dialog is not None and self.queue_insert_dialog.isVisible():
+            self.queue_insert_dialog.close()
+            return
         # 主面板没开，但问问小花弹窗开着：先收掉它，再正常展开主面板
         if self.ask_flower_dialog is not None and self.ask_flower_dialog.isVisible():
             self.ask_flower_dialog.close()
@@ -2548,6 +3287,8 @@ class ZhujianBall(QWidget):
             self.polish_panel.close()
         if self.compaction_panel is not None and self.compaction_panel.isVisible():
             self.compaction_panel.close()
+        if self.queue_insert_dialog is not None and self.queue_insert_dialog.isVisible():
+            self.queue_insert_dialog.close()
         if self.context_menu is None:
             self.context_menu = SendModeMenu(self)
         self.context_menu.show_at(global_pos)
@@ -2872,6 +3613,30 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
         self.btn_say.clicked.connect(self._open_read_panel)
         say_row.addWidget(self.btn_say)
         root.addWidget(self.say_tool)
+
+        # 等 ta 说完再发：写下一句想对 ta 说的话，等这轮回复说完再自然接上（不打断）
+        self.queue_insert_tool = QFrame()
+        self.queue_insert_tool.setObjectName("toolRow")
+        qi_row = QHBoxLayout(self.queue_insert_tool)
+        qi_row.setContentsMargins(10, 8, 10, 8)
+        qi_row.setSpacing(10)
+        qi_copy = QVBoxLayout()
+        qi_copy.setSpacing(2)
+        self.lbl_qi_title = QLabel("等 ta 说完再发")
+        self.lbl_qi_title.setObjectName("toolTitle")
+        qi_copy.addWidget(self.lbl_qi_title)
+        self.lbl_qi_desc = QLabel("不打断 ta，这轮结束就自动发出去")
+        self.lbl_qi_desc.setObjectName("toolDesc")
+        self.lbl_qi_desc.setWordWrap(True)
+        qi_copy.addWidget(self.lbl_qi_desc)
+        qi_row.addLayout(qi_copy, 1)
+        self.btn_queue_insert = QPushButton("写一句")
+        self.btn_queue_insert.setObjectName("sayBtn")
+        self.btn_queue_insert.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_queue_insert.setToolTip("打开输入弹窗，这句话会等当前这轮回复结束后自动发出")
+        self.btn_queue_insert.clicked.connect(self._open_queue_insert)
+        qi_row.addWidget(self.btn_queue_insert)
+        root.addWidget(self.queue_insert_tool)
 
         # 问问小花：问 Hana 用法，弹窗内用解语花配置的模型直接回答（不注入真实会话）
         self.ask_flower_tool = QFrame()
@@ -3777,6 +4542,14 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
         self.ball.read_panel.open_for(self.ball.target_name, start=False)
         self.ball._set_fusion_panel_state("read")
 
+    def _open_queue_insert(self):
+        """点「写一句」：收起推荐面板，弹排队插话窗。写入队列，不当场打断。"""
+        if self.ball.queue_insert_dialog is None:
+            self.ball.queue_insert_dialog = QueueInsertDialog(self.ball)
+        self.close_menu()
+        self.ball.queue_insert_dialog.show_near_ball()
+        self.ball._set_fusion_panel_state("queue_insert")
+
     def _open_ask_flower(self):
         """点「问问小花」：收起推荐面板，弹提问窗，用解语花自己配置的模型直接回答。"""
         if not getattr(self.ball, "ask_flower_enabled", False):
@@ -4114,7 +4887,7 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
         show = not self.target_menu.isVisible()
         self._set_target_selector_visible(show)
         if show:
-            self.target_menu.view_mode = "pinned" if self.ball.target_mode == "pinned" else "auto"
+            self.target_menu.begin_browse()
             self.target_menu.refresh_sessions_async()
 
     def _set_target_selector_visible(self, visible):
@@ -4194,14 +4967,14 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
         self.adjustSize()
 
     def move_to_ball(self):
-        """与推荐面板同一套定位：左侧优先，左侧放不下才翻到右侧。"""
+        """与推荐面板同一套定位：球在哪半屏就往屏幕中间那侧开，放不下才换边。"""
         self._sync_size()
         b = self.ball
         screen = b.screen() or QApplication.primaryScreen()
         geo = screen.availableGeometry()
         bw = b.width()
         bh = b.height()
-        x, y, side = position_popup_left_first(
+        x, y, side = position_popup_away_from_wall(
             (b.x(), b.y(), bw, bh),
             (self.width(), self.height()),
             (geo.left(), geo.top(), geo.right() + 1, geo.bottom() + 1),
@@ -4619,7 +5392,7 @@ class ReadPanel(QFrame):
             self._set_reply_selector_visible(False)
         self._set_target_selector_visible(show)
         if show:
-            self.target_menu.view_mode = "pinned" if self.ball.target_mode == "pinned" else "auto"
+            self.target_menu.begin_browse()
             self.target_menu.refresh_sessions_async()
 
     def _update_target(self):
@@ -4862,14 +5635,14 @@ class ReadPanel(QFrame):
         self.refresh_replies_async(auto_read=bool(start))
 
     def move_to_ball(self):
-        """与推荐面板同一套定位：左侧优先，左侧放不下才翻到右侧。"""
+        """与推荐面板同一套定位：球在哪半屏就往屏幕中间那侧开，放不下才换边。"""
         self._sync_size()
         b = self.ball
         screen = b.screen() or QApplication.primaryScreen()
         geo = screen.availableGeometry()
         bw = b.width()
         bh = b.height()
-        x, y, side = position_popup_left_first(
+        x, y, side = position_popup_away_from_wall(
             (b.x(), b.y(), bw, bh),
             (self.width(), self.height()),
             (geo.left(), geo.top(), geo.right() + 1, geo.bottom() + 1),
@@ -5503,14 +6276,14 @@ class CompactionPanel(FadeOnLeaveMixin, QFrame):
         self.refresh_async()
 
     def move_to_ball(self):
-        """与推荐面板同一套定位：左侧优先，左侧放不下才翻到右侧。"""
+        """与推荐面板同一套定位：球在哪半屏就往屏幕中间那侧开，放不下才换边。"""
         self._sync_size()
         b = self.ball
         screen = b.screen() or QApplication.primaryScreen()
         geo = screen.availableGeometry()
         bw = b.width()
         bh = b.height()
-        x, y, side = position_popup_left_first(
+        x, y, side = position_popup_away_from_wall(
             (b.x(), b.y(), bw, bh),
             (self.width(), self.height()),
             (geo.left(), geo.top(), geo.right() + 1, geo.bottom() + 1),
@@ -6077,7 +6850,7 @@ class PolishPanel(FadeOnLeaveMixin, QFrame):
         show = not self.target_menu.isVisible()
         self._set_target_selector_visible(show)
         if show:
-            self.target_menu.view_mode = "pinned" if self.ball.target_mode == "pinned" else "auto"
+            self.target_menu.begin_browse()
             self.target_menu.refresh_sessions_async()
 
     def _set_target_selector_visible(self, visible):
@@ -6286,7 +7059,7 @@ class PolishPanel(FadeOnLeaveMixin, QFrame):
         ball = self.ball
         screen = ball.screen() or QApplication.primaryScreen()
         geo = screen.availableGeometry()
-        x, y, side = position_popup_left_first(
+        x, y, side = position_popup_away_from_wall(
             (ball.x(), ball.y(), ball.width(), ball.height()),
             (self.width(), self.height()),
             (geo.left(), geo.top(), geo.right() + 1, geo.bottom() + 1),
@@ -6313,6 +7086,8 @@ class PolishPanel(FadeOnLeaveMixin, QFrame):
             x = max(geo.left(), min(self.x(), geo.right() - self.width() + 1))
             y = max(geo.top(), min(self.y(), geo.bottom() - self.height() + 1))
             self.move(x, y)
+        else:
+            self._move_to_ball()
 
     # ── 双窗拖动（与朗读/问问小花同一套：弹窗与花朵一组移动） ──
     def mousePressEvent(self, e):

@@ -26,6 +26,7 @@ import {
   updateTtsConfig,
 } from "./lib/data.js";
 import { getStorageMode, protectKey, unprotectKey } from "./lib/crypto.js";
+import { QueueInsertManager } from "./lib/queue-insert.js";
 import {
   ResumeTurnTracker,
   StuckTurnTracker,
@@ -146,6 +147,15 @@ export default class Plugin {
       ctx.log?.warn?.("[解语花] 断联检测订阅失败（悬浮球续接功能不可用）", { error: error?.message || String(error) });
       dbgResume(`订阅失败: ${error?.message || String(error)}`);
     }
+
+    // ── 排队插话：悬浮球弹窗写入的句子挂在这里，等这一轮回复结束自动送达 ──
+    // 生命周期跟着插件：onload 建、onunload 停；不打断当前回合，只排队。
+    this._queueInsert = new QueueInsertManager({
+      dataDir: this._dataDir,
+      bus: ctx.bus,
+      log: ctx.log || console,
+    });
+    this._offQueue = this._queueInsert.start();
 
     ctx.log.info("解语花 loaded");
   }
@@ -340,6 +350,7 @@ export default class Plugin {
       this._resumeTracker?.dispose();
       this._stuckTracker?.dispose();
       if (typeof this._offResumeEvents === "function") this._offResumeEvents();
+      if (typeof this._offQueue === "function") this._offQueue();
     } catch (error) {
       this.ctx.log?.warn?.("解语花断联检测清理失败", { error: error?.message || String(error) });
     }
