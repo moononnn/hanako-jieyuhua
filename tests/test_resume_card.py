@@ -116,6 +116,34 @@ class ResumeCardTests(QtTestCase):
             ball.close()
             app.processEvents()
 
+    def test_loop_settings_live_in_resume_card_and_follow_saved_config(self):
+        app, ball, panel = self._make_panel()
+        try:
+            entry = self._resume_entry()
+            panel.show_resume(entry)
+            panel.apply_loop_state([], loop_rounds=8, loop_enabled=True)
+            app.processEvents()
+            self.assertFalse(panel.resume_body.isHidden())
+            self.assertTrue(panel.chk_loop_after_resume.isChecked())
+            self.assertEqual(panel.spin_loop.value(), 8)
+            self.assertTrue(panel.spin_loop.isVisible())
+            self.assertTrue(panel.loop_status_widget.isHidden())
+        finally:
+            panel.close()
+            ball.close()
+            app.processEvents()
+
+    def test_loop_completion_prompt_hides_new_loop_settings(self):
+        app, ball, panel = self._make_panel()
+        try:
+            panel.show_resume(self._resume_entry(source="loop_confirm", reason="伙伴问还要不要继续"))
+            self.assertTrue(panel.chk_loop_after_resume.isHidden())
+            self.assertTrue(panel.spin_loop.isHidden())
+        finally:
+            panel.close()
+            ball.close()
+            app.processEvents()
+
     def test_stuck_turn_resume_renders_card_head(self):
         app, ball, panel = self._make_panel()
         try:
@@ -141,12 +169,18 @@ class ResumeCardTests(QtTestCase):
     def test_set_resume_auto_state_syncs_button(self):
         app, ball, panel = self._make_panel()
         try:
+            # 2026-09-28：文案从「自动续接：开/关」改成两档「提醒我 / 自动接着（最多 N 次）」
             panel.set_resume_auto_state(True)
             self.assertTrue(panel.btn_resume_auto.isChecked())
-            self.assertIn("开", panel.btn_resume_auto.text())
+            self.assertIn("自动接着", panel.btn_resume_auto.text())
+            self.assertIn("最多", panel.btn_resume_auto.text())
             panel.set_resume_auto_state(False)
             self.assertFalse(panel.btn_resume_auto.isChecked())
-            self.assertIn("关", panel.btn_resume_auto.text())
+            self.assertIn("提醒我", panel.btn_resume_auto.text())
+            # 档位入口：直接按档位名设也要对
+            panel.set_resume_mode_state("auto", 7)
+            self.assertTrue(panel.btn_resume_auto.isChecked())
+            self.assertIn("7", panel.btn_resume_auto.text())
         finally:
             panel.close()
             ball.close()
@@ -164,6 +198,29 @@ class ResumeCardTests(QtTestCase):
             wait_loop.exec()
             self.assertTrue(panel.resume_body.isHidden())
             self.assertEqual(panel.lbl_head.text(), "解语花")
+        finally:
+            panel.close()
+            ball.close()
+            app.processEvents()
+
+    def test_continue_with_loop_starts_loop_before_sending_resume(self):
+        app, ball, panel = self._make_panel()
+        calls = []
+        def fake_api_post(url, payload, timeout=0):
+            calls.append((url, payload))
+            return {"ok": True}
+        try:
+            panel.show_resume(self._resume_entry())
+            panel.apply_loop_state([], loop_rounds=7, loop_enabled=True)
+            with patch.object(zhujian, "api_post", side_effect=fake_api_post):
+                panel._continue_resume()
+                wait_loop = QEventLoop()
+                zhujian.QTimer.singleShot(250, wait_loop.quit)
+                wait_loop.exec()
+                app.processEvents()
+            self.assertEqual([call[0] for call in calls], ["/loop/start", "/resume/continue"])
+            self.assertEqual(calls[0][1]["rounds"], 7)
+            self.assertTrue(panel._resume_finished)
         finally:
             panel.close()
             ball.close()

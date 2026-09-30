@@ -236,6 +236,7 @@ function renderSettingsPage(c, ctx, dataDir) {
     action: cfg.action,
     styles: cfg.styles || [],
     selectedByCount: cfg.selectedByCount || {},
+    resume: cfg.resume || {},
     source: model.source,
     providerId: model.providerId,
     modelId: model.modelId,
@@ -675,8 +676,7 @@ ${hanaCss ? `<link rel="stylesheet" href="${escapeAttr(hanaCss)}">` : ""}
       ${(cfg.styles || []).map((s, i) => `
       <button class="dgh-style-btn${(cfg.selectedByCount && cfg.selectedByCount[cfg.count] || []).includes(i) ? " on" : ""}" data-idx="${i}" type="button">${escapeAttr(s && typeof s === "object" ? s.name : s)}</button>`).join("")}
     </div>
-    <div class="dgh-sub" id="dgh-style-hint"></div>
-    <div class="dgh-row" style="margin-top:10px">
+    <div class="dgh-sub" id="dgh-style-hint"></div>    <div class="dgh-row" style="margin-top:10px">
       <button class="dgh-btn ghost" id="dgh-chat-open" type="button">💬 和小花聊一聊</button>
       <button class="dgh-btn ghost" id="dgh-reset-styles" type="button" style="margin-left:auto">恢复默认方向</button>
     </div>
@@ -698,6 +698,20 @@ ${hanaCss ? `<link rel="stylesheet" href="${escapeAttr(hanaCss)}">` : ""}
     <div class="dgh-card-title">点一下之后</div>
     ${radio("action", "send", cfg.action === "send", "直接发送", "点一下，这条话就以你的名义发出去")}
     ${radio("action", "copy", cfg.action === "copy", "复制", "复制到剪贴板，自己粘贴后再发")}
+  </div>
+
+  <div class="dgh-card">
+    <div class="dgh-card-title">断联续接</div>
+    <div class="dgh-sub">窗口卡住、超时或报错时，可以提醒你手动续接，也可以自动发送「继续哈」。</div>
+    <div class="dgh-row" style="margin-top:10px; gap:8px">
+      <button class="dgh-btn ghost" id="dgh-resume-mode" type="button">断联：提醒我</button>
+      <span class="dgh-sub" id="dgh-resume-hint"></span>
+    </div>
+    <div class="dgh-row" style="margin-top:10px; gap:8px; align-items:center">
+      <span class="dgh-sub">自动接着最多发</span>
+      <input class="dgh-input" id="dgh-max-auto" type="number" min="1" max="10" style="width:72px">
+      <span class="dgh-sub">次（一波断联内）</span>
+    </div>
   </div>
 
   <div class="dgh-foot">解语花 · 推荐由模型生成，只是建议，发不发你说了算</div>
@@ -2231,6 +2245,45 @@ function buildSettingsClientJs(apiBase, state) {
     if (g) g.hidden = true;
     apiPost("/config", { guideDismissed: true });
   });
+
+  // ── 断联续接：两档 + 自动次数上限 ──
+  var resumeModeBtn = $("dgh-resume-mode");
+  var resumeHint = $("dgh-resume-hint");
+  var maxAutoInput = $("dgh-max-auto");
+  var resumeMode = STATE.resume && STATE.resume.mode === "auto" ? "auto" : "notify";
+  function paintResumeMode() {
+    if (!resumeModeBtn) return;
+    resumeModeBtn.textContent = resumeMode === "auto" ? "断联：自动接着" : "断联：提醒我";
+    resumeModeBtn.classList.toggle("primary", resumeMode === "auto");
+    if (resumeHint) {
+      resumeHint.textContent = resumeMode === "auto"
+        ? "窗口一断就直接发「继续哈」，不发满上限就改回弹窗提醒你。"
+        : "窗口断了弹个小卡，你点一下才发。";
+    }
+  }
+  function saveResume(extra) {
+    var patch = {
+      mode: resumeMode,
+      maxAuto: maxAutoInput ? Number(maxAutoInput.value) : 3,
+    };
+    if (extra) { for (var k in extra) { if (Object.prototype.hasOwnProperty.call(extra, k)) patch[k] = extra[k]; } }
+    return apiPost("/config", { resume: patch }).then(function (res) {
+      if (res && res.ok) showToast("已保存", false);
+      else showToast((res && res.error) || "保存失败", true);
+      return res;
+    });
+  }
+  if (resumeModeBtn) resumeModeBtn.addEventListener("click", function () {
+    resumeMode = resumeMode === "auto" ? "notify" : "auto";
+    paintResumeMode();
+    saveResume();
+  });
+  [maxAutoInput].forEach(function (el) {
+    if (!el) return;
+    el.addEventListener("change", function () { saveResume(); });
+  });
+  if (maxAutoInput && STATE.resume && STATE.resume.maxAuto) maxAutoInput.value = STATE.resume.maxAuto;
+  paintResumeMode();
 
   // ── 恢复默认方向（一键回出厂） ──
   var resetBtn = $("dgh-reset-styles");

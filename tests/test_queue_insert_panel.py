@@ -299,7 +299,7 @@ class QueueInsertDialogTests(QtTestCase):
 
         self.assertEqual(d.input.toPlainText(), "那我们先吃饭，回头再聊", "入队成功后要保留原句供取消后修改")
         self.assertEqual(d._watched_id, "q1")
-        self.assertIn(("/queue-insert", {"text": "那我们先吃饭，回头再聊", "sessionPath": ""}), self._stub.calls["post"])
+        self.assertIn(("/queue-insert", {"text": "那我们先吃饭，回头再聊", "sessionPath": "", "rounds": 1}), self._stub.calls["post"])
         self.assertIn("存好了", d.lbl_status.text())
         self.assertTrue(d.input.isReadOnly(), "排队期间输入框必须锁定")
         self.assertFalse(d.btn_target.isEnabled(), "排队后目标也必须冻结")
@@ -327,7 +327,7 @@ class QueueInsertDialogTests(QtTestCase):
         self.assertTrue(d.target_menu.isHidden(), "发送请求期间必须关闭整个目标菜单")
         pump(_APP, 0.35)
         self.assertEqual(captured_on, [main_thread], "目标必须在点击发送的 UI 线程当场冻结，后台不得重新读取")
-        self.assertIn(("/queue-insert", {"text": "发到固定窗口", "sessionPath": pinned["sessionPath"]}), calls["post"])
+        self.assertIn(("/queue-insert", {"text": "发到固定窗口", "sessionPath": pinned["sessionPath"], "rounds": 1}), calls["post"])
         self.assertEqual(d._queued_session_path, pinned["sessionPath"])
         self.assertFalse(d.btn_target.isEnabled())
         d.close()
@@ -360,6 +360,94 @@ class QueueInsertDialogTests(QtTestCase):
         d._send()
         pump(_APP, 0.35)
         self.assertIn("已经在队列里", d.lbl_status.text())
+        d.close()
+
+    def test_loop_rounds_are_free_to_choose(self):
+        ball, d = make_dialog()
+        self.assertEqual(d.spin_loop_rounds.minimum(), 1)
+        self.assertEqual(d.spin_loop_rounds.maximum(), 50, "轮数开放，不预设档位替用户拍板")
+        self.assertEqual(d.spin_loop_rounds.value(), 1, "默认不循环，跟以前一样只说一次")
+        self.assertEqual(
+            d.spin_loop_rounds.buttonSymbols(),
+            zhujian.QAbstractSpinBox.ButtonSymbols.NoButtons,
+            "原生上下箭头跟手帐风不搭，微调交给自绘的 − / +",
+        )
+        self.assertIn("只说这一次", d.lbl_loop_note.text())
+        # 「轮」是框外独立标签，不是输入框里的文本，所以拖不蓝
+        self.assertEqual(d.lbl_loop_unit.text(), "轮")
+        self.assertFalse(
+            bool(d.lbl_loop_unit.textInteractionFlags() & zhujian.Qt.TextInteractionFlag.TextSelectableByMouse),
+            "「轮」不能被鼠标选中",
+        )
+        d.close()
+
+    def test_step_buttons_move_and_clamp_rounds(self):
+        ball, d = make_dialog()
+        # 加减和数字必须同一根基线：之前被弹窗通用 QPushButton 的 min-height 撑成高低不齐
+        heights = {d.btn_loop_minus.height(), d.spin_loop_rounds.height(), d.btn_loop_plus.height()}
+        self.assertEqual(len(heights), 1, "加减和数字要同高，否则一行看着就是歪的")
+        self.assertFalse(d.btn_loop_minus.isEnabled(), "已经在最小值，减号要灰掉")
+        d.btn_loop_plus.click()
+        self.assertEqual(d.spin_loop_rounds.value(), 2)
+        self.assertTrue(d.btn_loop_minus.isEnabled())
+        self.assertIn("满 2 轮停", d.lbl_loop_note.text())
+        d.btn_loop_minus.click()
+        self.assertEqual(d.spin_loop_rounds.value(), 1)
+        self.assertFalse(d.btn_loop_minus.isEnabled())
+        self.assertTrue(d.btn_loop_plus.autoRepeat(), "长按要能连点，不然从 1 调到 20 要点断手")
+        d.spin_loop_rounds.setValue(50)
+        self.assertFalse(d.btn_loop_plus.isEnabled(), "到上限了，加号要灰掉")
+        d.spin_loop_rounds.setValue(30)
+        self.assertTrue(d.btn_loop_plus.isEnabled())
+        d.close()
+
+    def test_loop_rounds_sent_with_queue_request(self):
+        ball, d = make_dialog()
+        calls = self.stub(post_result={"ok": True, "id": "q1", "rounds": 3})
+        d.show()
+        d.spin_loop_rounds.setValue(3)
+        d.input.setPlainText("继续推进这个任务")
+        d._send()
+        pump(_APP, 0.35)
+        self.assertIn(
+            ("/queue-insert", {"text": "继续推进这个任务", "sessionPath": "", "rounds": 3}),
+            calls["post"],
+        )
+        self.assertIn("3 轮", d.lbl_status.text())
+        self.assertFalse(d.spin_loop_rounds.isEnabled(), "排队后轮数也要冻结，不能边跑边改")
+        self.assertFalse(d.btn_loop_plus.isEnabled())
+        d.close()
+
+    def test_queued_loop_shows_progress(self):
+        ball, d = make_dialog()
+        self.stub()
+        d._watched_id = "q1"
+        d._apply_state({"state": "pending", "id": "q1", "text": "继续", "loopTotal": 5, "repeat": 3})
+        self.assertIn("循环 5 轮", d.lbl_status.text())
+        self.assertIn("已发 2 轮", d.lbl_status.text())
+        d.close()
+
+    def test_finished_loop_says_so_and_resets_rounds(self):
+        ball, d = make_dialog()
+        self.stub()
+        d._watched_id = "q1"
+        d.spin_loop_rounds.setValue(10)
+        d._set_queued(True)
+        d.poll_timer.start()
+        d._apply_state({"state": "sent", "id": "q1", "text": "继续", "loopTotal": 10})
+        self.assertIn("循环 10 轮跑完了", d.lbl_status.text())
+        self.assertEqual(d.spin_loop_rounds.value(), 1, "跑完一轮循环后轮数归位，别让下一句莫名带上循环")
+        self.assertIn("只说这一次", d.lbl_loop_note.text())
+        self.assertFalse(d.poll_timer.isActive())
+        d.close()
+
+    def test_looping_duplicate_says_looping(self):
+        ball, d = make_dialog()
+        self.stub(post_result={"ok": True, "id": "q1", "duplicated": True, "looping": True})
+        d.input.setPlainText("继续")
+        d._send()
+        pump(_APP, 0.35)
+        self.assertIn("循环里跑着", d.lbl_status.text())
         d.close()
 
     def test_send_failure_keeps_text_for_retry(self):

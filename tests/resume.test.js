@@ -383,26 +383,44 @@ test("push/listResumeNotice：60 秒内可见，过期过滤", async () => {
 
 // ─── 配置默认与归一化 ───
 
-test("默认配置：resume 提醒开、自动续接关", () => {
+test("默认配置：resume 提醒档、不自动发、不循环", () => {
+  assert.equal(DEFAULT_CONFIG.resume.mode, "notify");
+  assert.equal(DEFAULT_CONFIG.resume.maxAuto, 3);
+  assert.equal(DEFAULT_CONFIG.resume.loopEnabled, false);
+  assert.equal(DEFAULT_CONFIG.resume.loopRounds, 5);
+  // 派生字段与 mode 一致
   assert.equal(DEFAULT_CONFIG.resume.enabled, true);
   assert.equal(DEFAULT_CONFIG.resume.autoContinue, false);
 });
 
-test("normalizeConfig 收 resume 布尔开关并忽略非法值", async () => {
+test("normalizeConfig：两档 mode 派生旧开关，老数据按旧语义折算", async () => {
   const dir = tmpDir();
   const data = loadData(dir);
+  // 老数据：原来手动关过断联（enabled:false）但 autoContinue=true → 落到 auto 档
   data.config = { presentation: "ball", resume: { enabled: false, autoContinue: true } };
   fs.writeFileSync(path.join(dir, "data.json"), JSON.stringify(data));
   const cfg = loadData(dir).config;
-  assert.equal(cfg.resume.enabled, false);
+  assert.equal(cfg.resume.mode, "auto");
   assert.equal(cfg.resume.autoContinue, true);
-  // 非法值回默认
+  // 不再有「关掉」档：enabled 不再由老数据决定
+  assert.equal(cfg.resume.enabled, true);
+
+  // 非法值回默认档
   const data2 = loadData(dir);
-  data2.config = { resume: { enabled: "yes", autoContinue: 1 } };
+  data2.config = { resume: { enabled: "yes", autoContinue: 1, mode: "乱七八糟" } };
   fs.writeFileSync(path.join(dir, "data.json"), JSON.stringify(data2));
   const cfg2 = loadData(dir).config;
-  assert.equal(cfg2.resume.enabled, true);
+  assert.equal(cfg2.resume.mode, "notify");
   assert.equal(cfg2.resume.autoContinue, false);
+
+  // 次数与轮数都夹在区间内
+  const data3 = loadData(dir);
+  data3.config = { resume: { mode: "auto", maxAuto: 999, loopRounds: -4 } };
+  fs.writeFileSync(path.join(dir, "data.json"), JSON.stringify(data3));
+  const cfg3 = loadData(dir).config;
+  assert.equal(cfg3.resume.maxAuto, 10);
+  assert.equal(cfg3.resume.loopRounds, 5);
+  assert.equal(cfg3.resume.loopEnabled, false);
 });
 
 // ─── 续接发送（sendResumeContinue，zhujian.js） ───

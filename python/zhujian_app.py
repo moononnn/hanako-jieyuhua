@@ -45,7 +45,8 @@ from PyQt6.QtGui import (
 from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QPushButton, QLabel, QFrame, QLineEdit, QPlainTextEdit, QScrollArea,
-    QTextEdit, QVBoxLayout, QHBoxLayout, QGridLayout, QSizePolicy,
+    QTextEdit, QVBoxLayout, QHBoxLayout, QGridLayout, QSizePolicy, QSpinBox, QCheckBox,
+    QAbstractSpinBox,
 )
 
 # 语音朗读播放（PyQt6 自带 QtMultimedia；缺失时按钮给出提示，不硬崩）
@@ -1273,6 +1274,9 @@ class QueueInsertDialog(FadeOnLeaveMixin, QFrame):
 
     target_ready = pyqtSignal(object)
     QI_POLL_MS = 1000
+    LOOP_MIN_ROUNDS = 1
+    LOOP_MAX_ROUNDS = 50
+    LOOP_DEFAULT_ROUNDS = 1
 
     def __init__(self, ball):
         super().__init__(None)
@@ -1298,6 +1302,7 @@ class QueueInsertDialog(FadeOnLeaveMixin, QFrame):
         self._queued_session_path = ""
         self._watched_mismatch = 0
         self._queued = False
+        self._loop_locked = False
         self._poll_seq = 0
         self._target_seq = 0
         # 有没有真正拿到过 /target 的回包：没有才显示「正在读取」，拿到了还是空就是真没目标
@@ -1363,6 +1368,65 @@ class QueueInsertDialog(FadeOnLeaveMixin, QFrame):
         self.input.focusInEvent = self._on_input_focus_in
         self.input.focusOutEvent = self._on_input_focus_out
         root.addWidget(self.input)
+
+        # 循环轮数：想发几轮自己定，不预设档位（预设档位等于替用户拍板）
+        # 表现上是一条薄荷数量选择器：[−] [ 1 ] 轮 [+]，加减可长按连点
+        loop_row = QHBoxLayout()
+        loop_row.setSpacing(6)
+        self.lbl_loop_title = QLabel("循环")
+        self.lbl_loop_title.setObjectName("qiLoopLabel")
+        loop_row.addWidget(self.lbl_loop_title)
+
+        self.btn_loop_minus = QPushButton("−")
+        self.btn_loop_minus.setObjectName("qiLoopStep")
+        self.btn_loop_minus.setFixedWidth(26)
+        self.btn_loop_minus.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_loop_minus.setAutoRepeat(True)
+        self.btn_loop_minus.setAutoRepeatDelay(500)
+        self.btn_loop_minus.setAutoRepeatInterval(90)
+        self.btn_loop_minus.setToolTip("少发一轮（按住可以连续减）")
+        self.btn_loop_minus.clicked.connect(lambda: self._step_loop(-1))
+        loop_row.addWidget(self.btn_loop_minus)
+
+        self.spin_loop_rounds = QSpinBox()
+        self.spin_loop_rounds.setObjectName("qiLoopValue")
+        self.spin_loop_rounds.setRange(self.LOOP_MIN_ROUNDS, self.LOOP_MAX_ROUNDS)
+        self.spin_loop_rounds.setValue(self.LOOP_DEFAULT_ROUNDS)
+        # 去掉原生上下小箭头：它跟这套手帐风撞得厉害；改由两侧的 − / + 负责微调
+        self.spin_loop_rounds.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.spin_loop_rounds.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.spin_loop_rounds.setFixedWidth(42)
+        self.spin_loop_rounds.setToolTip(
+            "这句连着发几轮：1 = 只说这一次；调大就每轮说完自动接着发。\n"
+            "中途你自己插话、或者点「先不发」，循环就停。"
+        )
+        self.spin_loop_rounds.valueChanged.connect(self._on_loop_rounds_changed)
+        loop_row.addWidget(self.spin_loop_rounds)
+
+        # 「轮」是框外的独立标签，不是输入框文本，所以拖不蓝也选不中
+        self.lbl_loop_unit = QLabel("轮")
+        self.lbl_loop_unit.setObjectName("qiLoopUnit")
+        loop_row.addWidget(self.lbl_loop_unit)
+
+        self.btn_loop_plus = QPushButton("+")
+        self.btn_loop_plus.setObjectName("qiLoopStep")
+        self.btn_loop_plus.setFixedWidth(26)
+        self.btn_loop_plus.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_loop_plus.setAutoRepeat(True)
+        self.btn_loop_plus.setAutoRepeatDelay(500)
+        self.btn_loop_plus.setAutoRepeatInterval(90)
+        self.btn_loop_plus.setToolTip("多发一轮（按住可以连续加）")
+        self.btn_loop_plus.clicked.connect(lambda: self._step_loop(1))
+        loop_row.addWidget(self.btn_loop_plus)
+
+        loop_row.addStretch(1)
+        root.addLayout(loop_row)
+
+        self.lbl_loop_note = QLabel("")
+        self.lbl_loop_note.setObjectName("qiLoopNote")
+        self.lbl_loop_note.setWordWrap(True)
+        root.addWidget(self.lbl_loop_note)
+        self._sync_loop_ui()
 
         self.lbl_status = QLabel("")
         self.lbl_status.setObjectName("qiStatus")
@@ -1548,11 +1612,43 @@ class QueueInsertDialog(FadeOnLeaveMixin, QFrame):
         self.adjustSize()
         self._reanchor()
 
+    def _step_loop(self, delta):
+        """± 按钮：数字框自己会夹范围，这里只负责挪一格。"""
+        self.spin_loop_rounds.setValue(self.spin_loop_rounds.value() + int(delta))
+
+    def _on_loop_rounds_changed(self, _value):
+        self._sync_loop_ui()
+
+    def _sync_loop_ui(self):
+        value = int(self.spin_loop_rounds.value())
+        free = not getattr(self, "_loop_locked", False)
+        self.btn_loop_minus.setEnabled(free and value > self.spin_loop_rounds.minimum())
+        self.btn_loop_plus.setEnabled(free and value < self.spin_loop_rounds.maximum())
+        if value <= 1:
+            self.lbl_loop_note.setText("循环：只说这一次，跟以前一样")
+        else:
+            self.lbl_loop_note.setText(f"循环：ta 说完一轮自动接着发，满 {value} 轮停")
+
+    def _set_loop_enabled(self, enabled):
+        self._loop_locked = not enabled
+        self.spin_loop_rounds.setEnabled(enabled)
+        self._sync_loop_ui()
+
+    def _loop_progress_text(self, info):
+        """循环进度：已发几轮、还剩几轮。非循环项返回空串。"""
+        total = int(info.get("loopTotal") or 1)
+        if total <= 1:
+            return ""
+        remaining = int(info.get("repeat") or 0)
+        done = max(0, total - remaining)
+        return f"循环 {total} 轮 · 已发 {done} 轮"
+
     def _set_queued(self, queued):
         self._queued = bool(queued)
         self.input.setReadOnly(self._queued)
         self.btn_send.setEnabled(not self._queued)
         self.btn_target.setEnabled(not self._queued)
+        self._set_loop_enabled(not self._queued)
         # 句已存进队列时不让随手关窗：关窗不撤队，容易让人以为不发了
         if hasattr(self, "btn_head_close"):
             self.btn_head_close.setEnabled(not self._queued)
@@ -1569,6 +1665,7 @@ class QueueInsertDialog(FadeOnLeaveMixin, QFrame):
         self.btn_send.setEnabled(not busy and not self._queued)
         self.btn_cancel.setEnabled(not busy)
         self.btn_target.setEnabled(not busy and not self._queued)
+        self._set_loop_enabled(not busy and not self._queued)
         if busy:
             self.target_menu.hide()
             self._update_target()
@@ -1637,6 +1734,7 @@ class QueueInsertDialog(FadeOnLeaveMixin, QFrame):
             return
         # 点击这一刻就冻结目标；后台线程只能使用这份快照，不能晚一步再读已变化的全局选择。
         target_path = self._current_target_path()
+        loop_rounds = int(self.spin_loop_rounds.value())
         self._set_busy(True)
         # 回包确认入队之后才能说“存好了”
         self._set_status("正在存着…", "normal")
@@ -1648,6 +1746,7 @@ class QueueInsertDialog(FadeOnLeaveMixin, QFrame):
                 state["result"] = api_post("/queue-insert", {
                     "text": text,
                     "sessionPath": target_path,
+                    "rounds": loop_rounds,
                 }, timeout=10)
             except urllib.error.HTTPError as e:
                 detail = ""
@@ -1676,7 +1775,12 @@ class QueueInsertDialog(FadeOnLeaveMixin, QFrame):
                 self._queued_session_path = result.get("sessionPath") or self._current_target_path()
                 self._set_queued(True)
                 if result.get("duplicated"):
-                    self._set_status("这句已经在队列里了，这轮结束就发", "normal")
+                    if result.get("looping"):
+                        self._set_status("这句正在循环里跑着，到轮数自己停", "normal")
+                    else:
+                        self._set_status("这句已经在队列里了，这轮结束就发", "normal")
+                elif int(result.get("rounds") or 1) > 1:
+                    self._set_status(f"存好了，会自动接着发 {int(result.get('rounds'))} 轮", "ok")
                 else:
                     self._set_status("存好了，这轮结束就发", "ok")
                 if not self.poll_timer.isActive():
@@ -1744,14 +1848,16 @@ class QueueInsertDialog(FadeOnLeaveMixin, QFrame):
             if info.get("text"):
                 self.input.setPlainText(info.get("text"))
             self._set_queued(True)
-            self._set_status("在等着，这轮结束就发", "normal")
+            progress = self._loop_progress_text(info)
+            self._set_status(f"在等着，这轮结束就发 · {progress}" if progress else "在等着，这轮结束就发", "normal")
         elif state == "sending":
             self._watched_id = info.get("id") or self._watched_id
             self._queued_session_path = info.get("sessionPath") or self._queued_session_path or self._current_target_path()
             if info.get("text"):
                 self.input.setPlainText(info.get("text"))
             self._set_queued(True)
-            self._set_status("正在送过去…", "normal")
+            progress = self._loop_progress_text(info)
+            self._set_status(f"正在送过去… · {progress}" if progress else "正在送过去…", "normal")
         elif state in {"sent", "skipped"} and not self._watched_id:
             return  # 初次打开只接管活队列，不能让历史终态清掉用户刚写的新草稿
         elif state == "sent":
@@ -1760,18 +1866,24 @@ class QueueInsertDialog(FadeOnLeaveMixin, QFrame):
             self._queued_session_path = ""
             self._set_queued(False)
             self.input.clear()
-            self._set_status("发出去了，ta 应该已经看到", "ok")
+            if int(info.get("loopTotal") or 1) > 1:
+                self.spin_loop_rounds.setValue(self.LOOP_DEFAULT_ROUNDS)
+                self._set_status(f"循环 {int(info.get('loopTotal'))} 轮跑完了", "ok")
+            else:
+                self._set_status("发出去了，ta 应该已经看到", "ok")
         elif state == "skipped":
             self.poll_timer.stop()
             self._watched_id = ""
             self._queued_session_path = ""
             self._set_queued(False)
+            self.spin_loop_rounds.setValue(self.LOOP_DEFAULT_ROUNDS)
             self._set_status(info.get("reason") or "这句这次没发出去", "warn")
         elif state == "empty" and self._watched_id:
             self.poll_timer.stop()
             self._watched_id = ""
             self._queued_session_path = ""
             self._set_queued(False)
+            self.spin_loop_rounds.setValue(self.LOOP_DEFAULT_ROUNDS)
             self._set_status("这句话已经不在队列里了", "warn")
 
     # ── 定位 ──
@@ -1868,6 +1980,30 @@ class QueueInsertDialog(FadeOnLeaveMixin, QFrame):
             QLabel#menuTitle {{ font-size: 14px; font-weight: 700; color: {c['accent_deep']}; }}
             QLabel#menuSub {{ font-size: 10px; color: {c['sub']}; padding-bottom: 2px; }}
             QLabel#qiTargetLabel {{ color: {c['sub_deep']}; font-size: 11px; }}
+            QLabel#qiLoopLabel {{ color: {c['sub_deep']}; font-size: 11px; }}
+            QPushButton#qiLoopStep {{
+                color: {c['accent_deep']}; background: transparent;
+                border: none; border-radius: 7px;
+                font-size: 16px; font-weight: 700; padding: 0;
+                min-height: 24px; max-height: 24px;
+            }}
+            QPushButton#qiLoopStep:hover {{ background: {c['surface_alt']}; }}
+            QPushButton#qiLoopStep:disabled {{ color: {c['border']}; background: transparent; }}
+            QSpinBox#qiLoopValue {{
+                color: {c['ink']}; background: transparent;
+                border: none; border-radius: 7px;
+                padding: 0 4px; font-size: 13px; font-weight: 700;
+                min-height: 24px; max-height: 24px;
+            }}
+            QSpinBox#qiLoopValue:hover {{ background: {c['surface_alt']}; }}
+            QSpinBox#qiLoopValue:focus {{ background: {c['panel']}; }}
+            QSpinBox#qiLoopValue:disabled {{ color: {c['sub']}; background: transparent; }}
+            QSpinBox#qiLoopValue QLineEdit {{
+                color: {c['ink']}; background: transparent; border: none;
+                padding: 0 2px; font-size: 13px; font-weight: 700;
+            }}
+            QLabel#qiLoopUnit {{ color: {c['sub']}; font-size: 11px; }}
+            QLabel#qiLoopNote {{ color: {c['sub']}; font-size: 10px; padding-left: 2px; }}
             QLabel#qiTargetInfo {{ color: {c['sub']}; font-size: 10px; padding-left: 2px; }}
             QPushButton#qiTargetBtn {{
                 min-height: 28px; padding: 0 10px;
@@ -2382,7 +2518,11 @@ class ZhujianBall(QWidget):
                 "ok": False,
                 "pending": [],
                 "resume": [],
-                "resumeAuto": False,
+                "resumeMode": "notify",
+                "resumeMaxAuto": 3,
+                "loopEnabled": False,
+                "loopRounds": 5,
+                "loops": [],
                 "resumeNotices": [],
                 "ask_flower_enabled": None,
             }
@@ -2402,7 +2542,11 @@ class ZhujianBall(QWidget):
                         "ok": True,
                         "pending": data.get("pending") or [],
                         "resume": data.get("resume") or [],
-                        "resumeAuto": bool(data.get("resumeAuto")),
+                        "resumeMode": data.get("resumeMode") or "notify",
+                        "resumeMaxAuto": data.get("resumeMaxAuto"),
+                        "loopEnabled": data.get("loopEnabled") is True,
+                        "loopRounds": data.get("loopRounds"),
+                        "loops": data.get("loops") or [],
                         "resumeNotices": data.get("resumeNotices") or [],
                     })
             except Exception:
@@ -2495,7 +2639,8 @@ class ZhujianBall(QWidget):
                 self.menu.show()
                 self.menu.raise_()
                 self.menu.activateWindow()
-            self.menu.set_resume_auto_state(bool(payload.get("resumeAuto")))
+            self.menu.set_resume_mode_state(payload.get("resumeMode"), payload.get("resumeMaxAuto"))
+            self.menu.apply_loop_state(payload.get("loops") or [], payload.get("loopRounds"), payload.get("loopEnabled"))
             self.menu.show_resume(resume)
             if not resume_already_visible:
                 self.menu.raise_()
@@ -3357,6 +3502,8 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
     ask_response_ready = pyqtSignal(object)
     resume_continue_ready = pyqtSignal(object)
     resume_auto_ready = pyqtSignal(object)
+    loop_ready = pyqtSignal(object)
+    loop_preferences_ready = pyqtSignal(object)
 
     def __init__(self, ball):
         super().__init__(None)
@@ -3406,8 +3553,14 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
         self._resume_finished = False
         self._resume_user_hidden = False  # 用户主动收起 resume；轮询不自动打回脸上
         self._resume_auto = False
+        self._resume_max_auto = 3      # auto 档一波断联最多自动发几次（设置页可调）
+        self._loop_rounds = 5         # 循环轮数上限；关闭循环时仍保留
+        self._loop_session_path = ""
+        self._loop_state = None        # 当前对话的循环进度（运行中才有）
         self._resume_notice_timer = None
         self.resume_continue_ready.connect(self._apply_resume_continue_result)
+        self.loop_ready.connect(self._apply_loop_result)
+        self.loop_preferences_ready.connect(self._apply_loop_preferences_result)
         self.resume_auto_ready.connect(self._apply_resume_auto_result)
         self.refresh_ready.connect(self._apply_async_refresh)
         self.target_ready.connect(self._apply_target_state)
@@ -3559,6 +3712,27 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
         self.lbl_resume_reason.setObjectName("resumeReason")
         self.lbl_resume_reason.setWordWrap(True)
         resume_layout.addWidget(self.lbl_resume_reason)
+        self.chk_loop_after_resume = QCheckBox("继续后自动循环")
+        self.chk_loop_after_resume.setObjectName("loopAfterResume")
+        self.chk_loop_after_resume.setToolTip("先发送这句「继续哈」，伙伴每完成一轮就自动接着发，达到轮数后停止。")
+        resume_layout.addWidget(self.chk_loop_after_resume)
+        loop_settings = QHBoxLayout()
+        loop_settings.setContentsMargins(0, 0, 0, 0)
+        loop_settings.setSpacing(6)
+        self.lbl_loop_rounds = QLabel("最多续接")
+        self.spin_loop = QSpinBox()
+        self.spin_loop.setObjectName("loopSpin")
+        self.spin_loop.setRange(1, 50)
+        self.spin_loop.setValue(5)
+        self.spin_loop.setSuffix(" 轮")
+        self.spin_loop.setFixedWidth(88)
+        self.spin_loop.setToolTip("达到轮数后自动停止")
+        loop_settings.addWidget(self.lbl_loop_rounds)
+        loop_settings.addWidget(self.spin_loop)
+        loop_settings.addStretch(1)
+        resume_layout.addLayout(loop_settings)
+        self.chk_loop_after_resume.toggled.connect(self._save_loop_preferences)
+        self.spin_loop.valueChanged.connect(self._save_loop_preferences)
         resume_actions = QHBoxLayout()
         resume_actions.setContentsMargins(0, 0, 0, 0)
         resume_actions.setSpacing(8)
@@ -3568,16 +3742,33 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
         self.btn_resume_continue.setToolTip("往这个窗口发一条「继续哈」，接上话头")
         self.btn_resume_continue.clicked.connect(self._continue_resume)
         resume_actions.addWidget(self.btn_resume_continue)
-        self.btn_resume_auto = QPushButton("自动续接：关")
+        self.btn_resume_auto = QPushButton("断联：提醒我")
         self.btn_resume_auto.setObjectName("resumeAuto")
         self.btn_resume_auto.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_resume_auto.setCheckable(True)
-        self.btn_resume_auto.setToolTip("打开后检测到窗口断联会自动发「继续哈」，不再弹窗")
+        self.btn_resume_auto.setToolTip("点一下切档：提醒我 = 弹卡让你点；自动接着 = 直接发「继续哈」（最多几次可调）")
         self.btn_resume_auto.clicked.connect(self._toggle_resume_auto)
         resume_actions.addWidget(self.btn_resume_auto, 0, Qt.AlignmentFlag.AlignRight)
         resume_layout.addLayout(resume_actions)
         self.resume_body.hide()
         root.addWidget(self.resume_body)
+
+        # 循环设置只在自动弹出的续接卡里展示；主面板仅在循环运行时保留停止入口。
+        self.loop_status_row = QHBoxLayout()
+        self.loop_status_row.setContentsMargins(0, 2, 0, 0)
+        self.loop_status_row.setSpacing(6)
+        self.lbl_loop_state = QLabel("")
+        self.lbl_loop_state.setObjectName("loopState")
+        self.btn_loop = QPushButton("停")
+        self.btn_loop.setObjectName("loopBtn")
+        self.btn_loop.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_loop.clicked.connect(self._toggle_loop)
+        self.loop_status_row.addWidget(self.lbl_loop_state, 1)
+        self.loop_status_row.addWidget(self.btn_loop)
+        self.loop_status_widget = QWidget()
+        self.loop_status_widget.setLayout(self.loop_status_row)
+        self.loop_status_widget.hide()
+        root.addWidget(self.loop_status_widget)
 
         # 自动续接成功的短暂提示条（轮询带回，面板开着时显示几秒）
         self.lbl_resume_notice = QLabel("")
@@ -3868,6 +4059,19 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
             }}
             QPushButton#resumeAuto:hover {{ border-color: {c['accent']}; }}
             QLabel#resumeNotice {{ color: {c['pink']}; font-size: 11px; font-weight: 600; padding: 2px 2px 0; }}
+            QLabel#loopLabel {{ color: {c['sub']}; font-size: 11px; }}
+            QLabel#loopState {{ color: {c['accent_deep']}; font-size: 11px; font-weight: 600; }}
+            QSpinBox#loopSpin {{
+                min-height: 26px; color: {c['sub']}; background: {c['surface']};
+                border: 1px solid {c['border']}; border-radius: 8px; padding: 0 4px; font-size: 11px;
+            }}
+            QPushButton#loopBtn {{
+                min-height: 26px; min-width: 52px; color: {c['accent_deep']}; background: {c['surface']};
+                border: 1px solid {c['border']}; border-radius: 9px;
+                font-size: 11px; font-weight: 600; padding: 0 10px;
+            }}
+            QPushButton#loopBtn:hover {{ border-color: {c['accent']}; }}
+            QPushButton#loopBtn:disabled {{ color: {c['sub']}; opacity: 0.6; }}
             QPushButton#refreshBtn, QPushButton#renameBtn, QPushButton#sayBtn {{
                 min-height: 28px; min-width: 88px; color: {c['accent_text']}; background: {c['accent']};
                 border: 1px solid {c['accent']}; border-radius: 10px;
@@ -4317,8 +4521,22 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
 
     def set_resume_auto_state(self, enabled):
         self._resume_auto = bool(enabled)
+        self.set_resume_mode_state("auto" if self._resume_auto else "notify")
+
+    def set_resume_mode_state(self, mode, max_auto=None):
+        """两档：notify=提醒我（默认）/ auto=自动接着。次数上限存在按钮提示里。"""
+        self._resume_auto = (mode == "auto")
         self.btn_resume_auto.setChecked(self._resume_auto)
-        self.btn_resume_auto.setText("自动续接：开" if self._resume_auto else "自动续接：关")
+        if self._resume_auto:
+            n = max_auto if isinstance(max_auto, int) and max_auto > 0 else 3
+            self.btn_resume_auto.setText(f"断联：自动接着（最多 {n} 次）")
+        else:
+            self.btn_resume_auto.setText("断联：提醒我")
+        self.btn_resume_auto.setToolTip(
+            "自动接着：一波断联里最多自动发「继续哈」"
+            f"{max_auto if isinstance(max_auto, int) else 3} 次，用完就改回弹窗提醒，不自作主张。\n"
+            "（次数到设置页调；点这个按钮可切回「提醒我」）"
+        )
 
     def _set_resume_mode(self, active):
         if active:
@@ -4337,6 +4555,7 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
             self.btn_ask_skip.hide()
             self.btn_ask_send.hide()
             self.resume_body.show()
+            self.loop_status_widget.hide()
             self.setMaximumHeight(400)
         else:
             self.setMaximumHeight(16777215)
@@ -4350,6 +4569,8 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
                 widget.show()
             self.resume_body.hide()
             self._resume_entry = None
+            if self._loop_state and self._loop_state.get("status") == "running":
+                self.loop_status_widget.show()
             self.set_ask_flower_enabled(self._ask_flower_enabled)
 
     def _render_resume(self, resume):
@@ -4363,33 +4584,87 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
         else:
             self.lbl_resume_from.setText("💬 来自某个窗口")
         self.lbl_resume_reason.setText(str(resume.get("reason") or "窗口断联了"))
+        is_loop_confirm = resume.get("source") == "loop_confirm"
+        self.chk_loop_after_resume.setVisible(not is_loop_confirm)
+        self.lbl_loop_rounds.setVisible(not is_loop_confirm)
+        self.spin_loop.setVisible(not is_loop_confirm)
         self.btn_resume_continue.setEnabled(True)
         self.btn_resume_continue.setText("继续哈")
+    def _save_loop_preferences(self, *_):
+        enabled = self.chk_loop_after_resume.isChecked()
+        rounds = self.spin_loop.value()
+        self._loop_rounds = rounds
+
+        def worker():
+            try:
+                result = api_post("/config", {"resume": {"loopEnabled": enabled, "loopRounds": rounds}}, timeout=6)
+                if not result or not result.get("ok"):
+                    raise RuntimeError((result or {}).get("error") or "保存失败")
+                if self._closed:
+                    return
+                self.loop_preferences_ready.emit({"ok": True})
+            except Exception as e:
+                if self._closed:
+                    return
+                try:
+                    self.loop_preferences_ready.emit({"ok": False, "error": str(e)})
+                except RuntimeError:
+                    pass
+
+        threading.Thread(target=worker, daemon=True, name="zhujian-loop-preferences").start()
+
+    def _apply_loop_preferences_result(self, payload):
+        if not payload.get("ok"):
+            self._flash(f"循环设置没保存上：{payload.get('error') or '再试一次'}")
+
     def _continue_resume(self):
         if not self.is_resume_open() or self._resume_responding:
             return
         self._resume_responding = True
         self.btn_resume_continue.setEnabled(False)
         self.btn_resume_continue.setText("发送中…")
-        resume_id = self._resume_entry.get("resumeId") or ""
+        resume = dict(self._resume_entry or {})
+        resume_id = resume.get("resumeId") or ""
+        start_loop = self.chk_loop_after_resume.isChecked() and resume.get("source") != "loop_confirm"
+        rounds = self.spin_loop.value()
+        if start_loop:
+            self._loop_session_path = str(resume.get("sessionPath") or "")
 
         def worker():
             result = {"ok": False, "error": "连不上解语花，看看插件开着没"}
+            loop_started = False
             try:
+                if start_loop:
+                    path = str(resume.get("sessionPath") or "")
+                    if not path:
+                        result = {"ok": False, "error": "找不到这段对话，暂时无法开启循环"}
+                        raise RuntimeError("missing sessionPath")
+                    started = api_post("/loop/start", {"sessionPath": path, "rounds": rounds}, timeout=8)
+                    if not started or not started.get("ok"):
+                        result = {"ok": False, "error": (started or {}).get("error") or "循环没能启动，再试一次"}
+                        raise RuntimeError("loop start failed")
+                    loop_started = True
                 data = api_post("/resume/continue", {"resumeId": resume_id}, timeout=20)
                 if data and data.get("ok"):
-                    result = {"ok": True}
+                    result = {"ok": True, "loopStarted": loop_started, "rounds": rounds}
                 else:
                     result = {"ok": False, "error": (data or {}).get("error") or "发送失败"}
             except urllib.error.HTTPError as e:
-                # 后端业务错误（待办已失效/会话已删等）带了真实原因，解析出来上屏
                 try:
                     body = json.loads(e.read().decode("utf-8", "replace"))
                     result = {"ok": False, "error": body.get("error") or f"发送失败了 ({e.code})"}
                 except Exception:
                     result = {"ok": False, "error": f"发送失败了 ({e.code})"}
+            except RuntimeError:
+                pass
             except Exception:
                 pass
+            if loop_started and not result.get("ok"):
+                try:
+                    api_post("/loop/stop", {"sessionId": resume.get("sessionId") or ""}, timeout=8)
+                except Exception:
+                    pass
+                self._loop_session_path = ""
             if self._closed:
                 return
             try:
@@ -4408,20 +4683,111 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
             self.btn_resume_continue.setText("继续哈")
             self.lbl_resume_reason.setText(f"发送失败：{payload.get('error') or '再试一次'}")
             return
-        self._flash("已发送 · 继续哈")
+        self._flash("已发送 · 继续哈" + (f" · 循环最多 {payload.get('rounds')} 轮" if payload.get("loopStarted") else ""))
         self._resume_finished = True
         # 已让窗口继续：短暂反馈后收起回悬浮球（下一轮轮询也收不到这条了）
         QTimer.singleShot(650, self.finish_resume_and_collapse)
 
+    # ── 循环投递启停（2026-09-28） ──
+
+    def _loop_target_path(self):
+        """优先使用续接卡或已运行循环绑定的会话，再回退到手动固定目标。"""
+        if self._resume_entry and self._resume_entry.get("sessionPath"):
+            return str(self._resume_entry["sessionPath"])
+        if self._loop_session_path:
+            return str(self._loop_session_path)
+        if getattr(self.ball, "target_mode", "") == "pinned" and getattr(self.ball, "pinned_target", None):
+            return str(self.ball.pinned_target.get("sessionPath") or "")
+        return ""
+
+    def apply_loop_state(self, loops, loop_rounds=None, loop_enabled=None):
+        if isinstance(loop_rounds, int) and loop_rounds > 0:
+            self._loop_rounds = loop_rounds
+            if self.spin_loop.value() != loop_rounds:
+                self.spin_loop.blockSignals(True)
+                self.spin_loop.setValue(loop_rounds)
+                self.spin_loop.blockSignals(False)
+        if isinstance(loop_enabled, bool) and self.chk_loop_after_resume.isChecked() != loop_enabled:
+            self.chk_loop_after_resume.blockSignals(True)
+            self.chk_loop_after_resume.setChecked(loop_enabled)
+            self.chk_loop_after_resume.blockSignals(False)
+        want = self._loop_target_path()
+        current = None
+        for item in loops or []:
+            if want and item.get("sessionPath") == want:
+                current = item
+                break
+        previous = self._loop_state
+        self._loop_state = current
+        if current:
+            self._loop_session_path = current.get("sessionPath") or self._loop_session_path
+        elif previous:
+            self._loop_session_path = ""
+        running = bool(current and current.get("status") == "running")
+        self.loop_status_widget.setVisible(running and not self.is_resume_open())
+        self.btn_loop.setEnabled(True)
+        self.btn_loop.setText("停")
+        if running:
+            done = int(current.get("done") or 0)
+            total = int(current.get("total") or 0)
+            self.lbl_loop_state.setText(f"循环中 · 第 {min(done + 1, total)}/{total} 轮")
+        else:
+            self.lbl_loop_state.setText("")
+
+    def _toggle_loop(self):
+        running = bool(self._loop_state and self._loop_state.get("status") == "running")
+        if not running:
+            return
+        payload = {"sessionId": self._loop_state.get("sessionId") or ""}
+        url = "/loop/stop"
+        self.btn_loop.setEnabled(False)
+
+        def worker():
+            result = {"ok": False, "error": "连不上解语花，看看插件开着没"}
+            try:
+                data = api_post(url, payload, timeout=8)
+                if data and data.get("ok"):
+                    result = {"ok": True, "stopped": running}
+                else:
+                    result = {"ok": False, "error": (data or {}).get("error") or "没成，再试一次"}
+            except urllib.error.HTTPError as e:
+                try:
+                    body = json.loads(e.read().decode("utf-8", "replace"))
+                    result = {"ok": False, "error": body.get("error") or f"没成 ({e.code})"}
+                except Exception:
+                    result = {"ok": False, "error": f"没成 ({e.code})"}
+            except Exception:
+                pass
+            if self._closed:
+                return
+            try:
+                self.loop_ready.emit(result)
+            except RuntimeError:
+                pass
+
+        threading.Thread(target=worker, daemon=True, name="zhujian-loop").start()
+
+    def _apply_loop_result(self, payload):
+        self.btn_loop.setEnabled(True)
+        if not payload.get("ok"):
+            self._flash(payload.get("error") or "没成，再试一次")
+            return
+        if payload.get("stopped"):
+            self._loop_session_path = ""
+            self.loop_status_widget.hide()
+            self._flash("循环停了")
+        else:
+            self._flash(f"接上了 · 最多 {self.spin_loop.value()} 轮")
+
     def _toggle_resume_auto(self, checked):
-        # 视觉先行：点了立刻显示目标状态，失败再回滚
+        # 视觉先行：点了立刻显示目标档位，失败再回滚
         self._resume_auto = bool(checked)
-        self.set_resume_auto_state(self._resume_auto)
+        self.set_resume_mode_state("auto" if self._resume_auto else "notify", self._resume_max_auto)
 
         def worker():
             result = {"ok": False}
             try:
-                data = api_post("/resume/auto", {"enabled": self._resume_auto}, timeout=6)
+                data = api_post("/resume/mode", {"mode": "auto" if self._resume_auto else "notify", "maxAuto": self._resume_max_auto}, timeout=6)
                 if data and data.get("ok"):
                     result = {"ok": True, "enabled": self._resume_auto}
             except Exception:
@@ -7752,7 +8118,41 @@ class BranchChatWindow(QFrame):
             self._append_status(error_msg)
 
 
+def _set_windows_dpi_awareness(set_process_dpi_awareness_context=None):
+    """在创建 QApplication 前启用 Windows Per-Monitor DPI Aware V2。"""
+    if sys.platform != "win32":
+        return False
+
+    try:
+        import ctypes
+        setter = set_process_dpi_awareness_context
+        if setter is None:
+            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            try:
+                setter = user32.SetProcessDpiAwarenessContext
+            except AttributeError:
+                try:
+                    shcore = ctypes.WinDLL("shcore", use_last_error=True)
+                    legacy = shcore.SetProcessDpiAwareness
+                    legacy.argtypes = [ctypes.c_int]
+                    legacy.restype = ctypes.c_long
+                    if legacy(2) == 0:
+                        return True
+                except Exception:
+                    pass
+                fallback = user32.SetProcessDPIAware
+                fallback.restype = ctypes.c_int
+                return bool(fallback())
+            setter.argtypes = [ctypes.c_void_p]
+            setter.restype = ctypes.c_int
+        # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 的句柄值为 (HANDLE)-4。
+        return bool(setter(ctypes.c_void_p(-4)))
+    except Exception:
+        return False
+
+
 def main():
+    _set_windows_dpi_awareness()
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )

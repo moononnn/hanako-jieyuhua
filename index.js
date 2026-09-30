@@ -27,6 +27,8 @@ import {
 } from "./lib/data.js";
 import { getStorageMode, protectKey, unprotectKey } from "./lib/crypto.js";
 import { QueueInsertManager } from "./lib/queue-insert.js";
+import { ContinueLoopRegistry, LOOP_MIN_GAP_MS, bindContinueLoop, normalizeLoopRounds } from "./lib/continue-loop.js";
+import { readRecentAssistantMessages } from "./lib/session.js";
 import {
   ResumeTurnTracker,
   StuckTurnTracker,
@@ -157,6 +159,12 @@ export default class Plugin {
     });
     this._offQueue = this._queueInsert.start();
 
+    // ── 循环投递：正常回合结束也接上「继续哈」，跟断联续接共用文案与停止入口 ──
+    this._loop = new ContinueLoopRegistry();
+    this._loopTimers = new Map();          // sessionId -> 最小间隔等待定时器
+    // 悬浮球是另一个进程，启停循环得经桥调起这里的状态机。
+    bindContinueLoop((action, payload = {}) => this._loopBridgeAction(action, payload));
+
     ctx.log.info("解语花 loaded");
   }
 
@@ -172,8 +180,15 @@ export default class Plugin {
       // 用户自己发新消息 = 回合有活人接手：停滞心跳取消，断联待办清掉
       this._stuckTracker.onActivity(sid);
       const selfSent = this._recentResumeSends.get(sid);
-      if (selfSent && Date.now() - selfSent < 2000) return; // 自己发的「继续哈」，不算用户接手
+      if (selfSent && Date.now() - selfSent < 2000) {
+        // 是我们自己发的「继续哈」。如果之前 ta 说过收工话、等的就是用户这句，那就在这里把循环放行。
+        this._loop?.resumeAfterConfirm(sid);
+        return; // 不算用户接手
+      }
       this._recentResumeSends.delete(sid);
+      // 活人接手：循环立刻停，不跟用户抢麦（2026-09-28 新增）。
+      const stopped = this._loop?.onUserMessage(sid);
+      if (stopped) this._clearLoopTimer(sid);
       resetResumeConsecutive(this._dataDir, sid);
       dismissResumeBySession(this._dataDir, sid);
       return;
@@ -260,8 +275,106 @@ export default class Plugin {
       this._stuckTracker.onActivity(info.sessionId);
       resetResumeConsecutive(this._dataDir, info.sessionId);
       dismissResumeBySession(this._dataDir, info.sessionId);
+      // 互斥：这一轮健康跑通就不该还挂着断联待办；有循环在跑才接续。
+      this._advanceContinueLoop(info.sessionId);
       dbgResume(`[健康] 正常回合完成 session=${info.sessionId}`);
     }
+  }
+
+  // ── 循环投递推进 ──
+
+  _clearLoopTimer(sessionId) {
+    const timer = this._loopTimers?.get(sessionId);
+    if (timer) clearTimeout(timer);
+    this._loopTimers?.delete(sessionId);
+  }
+
+  /**
+   * 一轮正常说完后决定要不要接上「继续哈」。
+   * 与断联续接互斥：健康回合不会同时产生断联待办，所以这里直接发，不入队。
+   * 完成判断只做提示不停手（折中方案）——像收工了就把决定权还给用户。
+   */
+  _advanceContinueLoop(sessionId) {
+    const state = this._loop?.get(sessionId);
+    if (!state) return;
+    let reply = "";
+    try {
+      reply = readRecentAssistantMessages(state.sessionPath, 1)?.[0]?.content || "";
+    } catch { /* 读不到就当没命中完成词，继续跑 */ }
+    const decision = this._loop.decideAfterTurn(sessionId, { assistantText: reply });
+    if (!decision) return;
+    if (decision.action === "wait") {
+      this._clearLoopTimer(sessionId);
+      const timer = setTimeout(() => {
+        this._loopTimers.delete(sessionId);
+        this._advanceContinueLoop(sessionId);
+      }, Math.max(decision.retryAt - Date.now(), 0));
+      timer.unref?.();
+      this._loopTimers.set(sessionId, timer);
+      return;
+    }
+    if (decision.action === "finished") {
+      dbgResume(`[循环] 轮数跑满 session=${sessionId}`);
+      return;
+    }
+    if (decision.action === "confirm") {
+      const who = decision.state.agentName || decision.state.title || "这个对话";
+      pushResumeNotice(this._dataDir, { agentName: who, title: "ta 好像做完了，还继续吗？" });
+      void createResumePending(this._dataDir, {
+        agentId: decision.state.agentId,
+        sessionId,
+        sessionPath: decision.state.sessionPath,
+        reason: "ta 好像做完了",
+        source: "loop_confirm",
+      });
+      dbgResume(`[循环] 命中完成措辞，转为询问 session=${sessionId}`);
+      return;
+    }
+    this._fireLoopContinue(sessionId);
+  }
+
+  async _fireLoopContinue(sessionId) {
+    const state = this._loop?.get(sessionId);
+    if (!state) return;
+    this._recentResumeSends.set(sessionId, Date.now());
+    try {
+      const result = await sendResumeContinue(this._dataDir, this.ctx.bus, { sessionPath: state.sessionPath });
+      if (result?.ok) {
+        const after = this._loop.markFired(sessionId);
+        dbgResume(`[循环] 已续 session=${sessionId} 轮次=${after?.done ?? "?"}/${after?.total ?? "?"}`);
+        if (after?.exhausted) {
+          pushResumeNotice(this._dataDir, {
+            agentName: state.agentName || "",
+            title: `🔁 ${after.total} 轮跑完了`,
+          });
+        }
+        return;
+      }
+      this._recentResumeSends.delete(sessionId);
+      // 发不出去就不再纠缠：回落成待办弹窗，跟断联续接一样的处理。
+      if (result?.notFound) this._loop?.stop(sessionId, "会话没了");
+      else await createResumePending(this._dataDir, {
+        agentId: state.agentId,
+        sessionId,
+        sessionPath: state.sessionPath,
+        reason: "循环续接没发出去",
+      });
+    } catch (error) {
+      this._recentResumeSends.delete(sessionId);
+      this.ctx.log?.warn?.("[解语花] 循环续接异常", { sessionId, error: error?.message || String(error) });
+    }
+  }
+
+  /** 停止循环（主面板的「停」按钮），顺带收掉等待中的定时器。 */
+  stopContinueLoop(sessionId, reason = "用户停止") {
+    this._clearLoopTimer(sessionId);
+    const result = this._loop?.stop(sessionId, reason);
+    if (result?.ok) dbgResume(`[循环] 已停止 session=${sessionId} reason=${reason}`);
+    return result || { ok: false, error: "这个对话没在循环" };
+  }
+
+  continueLoopState(sessionId) {
+    return this._loop?.get(sessionId) || null;
   }
 
   // ── 断联登记：自动模式直发「继续哈」；手动模式建悬浮球待办 ──
@@ -343,10 +456,56 @@ export default class Plugin {
     }
   }
 
+  /** 悬浮球代理过来的循环操作。只认白名单里的几个动作。 */
+  _loopBridgeAction(action, payload = {}) {
+    if (action === "start") {
+      const cfg = getConfig(this._dataDir);
+      const rounds = normalizeLoopRounds(payload.rounds) || cfg.resume?.loopRounds || 0;
+      if (!rounds) return { ok: false, error: "先在续接弹窗里设置循环轮数" };
+      return this._loop.start({
+        sessionId: payload.sessionId,
+        sessionPath: payload.sessionPath,
+        agentId: payload.agentId,
+        agentName: payload.agentName,
+        title: payload.title,
+        rounds,
+      });
+    }
+    if (action === "stop") return this.stopContinueLoop(payload.sessionId, "悬浮球手动停止");
+    if (action === "confirm") {
+      const state = payload.go === true ? this._loop.resumeAfterConfirm(payload.sessionId) : null;
+      if (payload.go !== true) this._loop.stop(payload.sessionId, "用户选择收工");
+      return { ok: Boolean(state) || payload.go !== true, state };
+    }
+    if (action === "state") {
+      return { ok: true, state: this._loop.get(payload.sessionId) };
+    }
+    if (action === "list") {
+      return {
+        ok: true,
+        states: this._loop.list().map((item) => ({
+          sessionId: item.sessionId,
+          // 悬浮球比对的是当前固定的对话，带上真实路径才能对上是哪一个在循环
+          sessionPath: item.sessionPath || "",
+          agentName: item.agentName || "",
+          title: item.title || "",
+          done: item.done,
+          total: item.total,
+          status: item.status,
+        })),
+      };
+    }
+    return { ok: false, error: "不支持的操作" };
+  }
+
   async onunload() {
     try {
       for (const timer of this._resumeTimers?.values() || []) clearTimeout(timer);
       this._resumeTimers?.clear();
+      for (const timer of this._loopTimers?.values() || []) clearTimeout(timer);
+      this._loopTimers?.clear();
+      this._loop?.dispose();
+      bindContinueLoop(null);
       this._resumeTracker?.dispose();
       this._stuckTracker?.dispose();
       if (typeof this._offResumeEvents === "function") this._offResumeEvents();

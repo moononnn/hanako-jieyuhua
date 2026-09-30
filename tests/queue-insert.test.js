@@ -37,11 +37,13 @@ const {
   markInsertSent,
   markInsertSkipped,
   normalizeQueueInsert,
+  normalizeRepeat,
   readUserMessagesAfter,
   releaseInsert,
+  settleInsertAfterSend,
 } = await import("../lib/queue-insert.js");
 const { loadData, saveData, withDataLock } = await import("../lib/data.js");
-const { enqueueUserInsert } = await import("../lib/zhujian.js");
+const { enqueueUserInsert, cancelUserInsert } = await import("../lib/zhujian.js");
 
 const SESSION_A = path.join(BASE, "agents", "hanako", "sessions", "sess_a.jsonl");
 const SESSION_B = path.join(BASE, "agents", "hanako", "sessions", "sess_b.jsonl");
@@ -357,6 +359,99 @@ test("describeInsertState：同时有在排的和已完结的，在排的优先"
   assert.equal(state.text, "还在等");
 });
 
+// ─── 循环投递（等 ta 说完再发 · 多轮） ───
+
+test("normalizeRepeat：夹在 0~50，空值走 fallback 不冒充跑完", () => {
+  assert.equal(normalizeRepeat(undefined), 1);
+  assert.equal(normalizeRepeat(null), 1);
+  assert.equal(normalizeRepeat(""), 1);
+  assert.equal(normalizeRepeat("乱写的"), 1);
+  assert.equal(normalizeRepeat(0, 5), 0);
+  assert.equal(normalizeRepeat(-3), 0);
+  assert.equal(normalizeRepeat(3.8), 3);
+  assert.equal(normalizeRepeat(999), 50);
+  assert.equal(normalizeRepeat(undefined, 0), 0);
+});
+
+test("enqueueInsert：rounds > 1 入队成循环项，不传就是普通项", () => {
+  const plain = enqueueInsert({}, { text: "只说一次", sessionPath: SESSION_A });
+  assert.equal(plain.item.loopTotal, 1);
+  assert.equal(plain.item.repeat, 1);
+  assert.equal(plain.looping, false);
+
+  const looped = enqueueInsert({}, { text: "推下去", sessionPath: SESSION_A, rounds: 4 });
+  assert.equal(looped.item.loopTotal, 4);
+  assert.equal(looped.item.repeat, 4);
+  assert.equal(looped.looping, true);
+
+  const clamped = enqueueInsert({}, { text: "太多轮", sessionPath: SESSION_A, rounds: 999 });
+  assert.equal(clamped.item.loopTotal, 50);
+
+  const zero = enqueueInsert({}, { text: "零轮", sessionPath: SESSION_A, rounds: 0 });
+  assert.equal(zero.item.loopTotal, 1, "轮数下限是 1，不能真的一条都不发");
+});
+
+test("normalizeQueueInsert：老数据没有轮数字段按普通项处理，缺 repeat 跟随 loopTotal", () => {
+  const out = normalizeQueueInsert({ items: [{ id: "old", text: "老句子", sessionPath: SESSION_A }] });
+  assert.equal(out.items[0].loopTotal, 1);
+  assert.equal(out.items[0].repeat, 1);
+
+  const broken = normalizeQueueInsert({ items: [{ id: "b", text: "坏字段", sessionPath: SESSION_A, loopTotal: 3 }] });
+  assert.equal(broken.items[0].repeat, 3, "repeat 缺失不能回落成 0，否则循环项会被当成已跑完直接收尾");
+});
+
+test("settleInsertAfterSend：普通项收尾，循环项减一轮重排", () => {
+  const now = Date.UTC(2026, 0, 2);
+  const plain = enqueueInsert({}, { text: "一句", sessionPath: SESSION_A }, now).queue;
+  const settledPlain = settleInsertAfterSend(plain, plain.items[0].id, now + 10);
+  assert.equal(settledPlain.items[0].status, "sent");
+  assert.equal(settledPlain.items[0].repeat, 0);
+
+  const looped = enqueueInsert({}, { text: "推", sessionPath: SESSION_A, rounds: 3 }, now).queue;
+  const id = looped.items[0].id;
+  const stage = settleInsertAfterSend(looped, id, now + 10, 1500);
+  assert.equal(stage.items[0].status, "pending", "没跑完就要重排回待发");
+  assert.equal(stage.items[0].repeat, 2);
+  assert.equal(stage.items[0].loopTotal, 3, "loopTotal 不跟着减，它是「是不是循环项」的唯一依据");
+  assert.equal(stage.items[0].notBefore, now + 1510, "重排后要给宿主留进入生成态的时间");
+  assert.equal(stage.items[0].attempts, 0, "新一轮从零计退避，不被上一轮失败拖慢");
+});
+
+test("settleInsertAfterSend：最后一轮必须收尾，不能掉回普通分支", () => {
+  const now = Date.UTC(2026, 0, 2);
+  const looped = enqueueInsert({}, { text: "推", sessionPath: SESSION_A, rounds: 3 }, now).queue;
+  const id = looped.items[0].id;
+  // 推到最后一轮：repeat 正好是 1，用剩余轮数判断就会误收尾成 N-1 轮
+  const last = { items: [{ ...looped.items[0], repeat: 1, status: "sending" }] };
+  const settled = settleInsertAfterSend(last, id, now + 10);
+  assert.equal(settled.items[0].status, "sent");
+  assert.equal(settled.items[0].repeat, 0);
+});
+
+test("detectContextDrift：循环项自己的同句不算插话，用户真插话才停", () => {
+  const item = { text: "继续推" };
+  assert.equal(
+    detectContextDrift(item, [{ text: "继续推" }, { text: "继续推" }], { looping: true }),
+    null,
+    "每轮发出去的同一句不是「别人接过话」",
+  );
+  const drift = detectContextDrift(item, [{ text: "继续推" }, { text: "算了先吃饭" }], { looping: true });
+  assert.equal(drift.drift, true);
+  assert.match(drift.reason, /循环就停在这儿/);
+});
+
+test("describeInsertState：循环项回报总轮数与剩余轮数", () => {
+  const queue = enqueueInsert({}, { text: "推", sessionPath: SESSION_A, rounds: 5 }).queue;
+  const before = describeInsertState(queue, SESSION_A);
+  assert.equal(before.loopTotal, 5);
+  assert.equal(before.repeat, 5);
+
+  const after = settleInsertAfterSend(queue, queue.items[0].id, Date.now() + 10);
+  const state = describeInsertState(after, SESSION_A);
+  assert.equal(state.loopTotal, 5);
+  assert.equal(state.repeat, 4, "发过一轮要能算出还剩几轮，弹窗靠它显示进度");
+});
+
 // ─── 与 data.js 的往返（含循环导入） ───
 
 test("queueInsert 能落盘并读回，循环导入不炸", async () => {
@@ -525,4 +620,102 @@ test("QueueInsertManager：没有 bus 时不启动，也不抛", () => {
   const manager = new QueueInsertManager({ dataDir: tmpDir(), bus: null, log: { warn() {} } });
   const stop = manager.start();
   assert.doesNotThrow(() => stop());
+});
+
+// ─── 循环投递端到端（会话文件真实落盘） ───
+
+/** 真实模拟：每轮投递都把这句话写进会话文件，否则测不到「上一轮自己那句话」。 */
+function loopBus(file, state) {
+  const bus = {
+    sent: [],
+    request: async (method, payload) => {
+      bus.sent.push(payload.text);
+      fs.appendFileSync(file, JSON.stringify({
+        type: "message",
+        role: "user",
+        content: payload.text,
+        timestamp: state.now,
+      }) + "\n");
+      return { accepted: true };
+    },
+  };
+  return bus;
+}
+
+test("QueueInsertManager：循环 3 轮真的发满 3 次（最后一轮不能掉回普通分支）", async () => {
+  const dataDir = tmpDir();
+  const file = path.join(BASE, "loop-three.jsonl");
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, "");
+  const state = { now: Date.UTC(2026, 0, 1) };
+  const bus = loopBus(file, state);
+  seedQueue(dataDir, enqueueInsert({}, { text: "继续", sessionPath: file, rounds: 3 }, state.now).queue);
+  const manager = new QueueInsertManager({
+    dataDir, bus, tickMs: 0, now: () => state.now, loopGapMs: 1500, log: { warn() {}, info() {} },
+  });
+
+  for (let i = 0; i < 4; i += 1) {
+    await manager.drain();
+    state.now += 2000;
+  }
+
+  assert.equal(bus.sent.length, 3, "设 3 轮就该发 3 次，不能只发 2 次");
+  assert.deepEqual(bus.sent, ["继续", "继续", "继续"]);
+  assert.equal(fs.readFileSync(file, "utf-8").trim().split("\n").length, 3, "三轮都要真的落进会话");
+  assert.equal(readQueue(dataDir).items[0].status, "sent");
+  assert.equal(readQueue(dataDir).items[0].repeat, 0);
+  manager.stop();
+});
+
+test("QueueInsertManager：循环途中用户自己接过话 → 循环停下，不硬发下一轮", async () => {
+  const dataDir = tmpDir();
+  const file = path.join(BASE, "loop-drift.jsonl");
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, "");
+  const state = { now: Date.UTC(2026, 0, 1) };
+  const bus = loopBus(file, state);
+  seedQueue(dataDir, enqueueInsert({}, { text: "继续推", sessionPath: file, rounds: 5 }, state.now).queue);
+  const manager = new QueueInsertManager({
+    dataDir, bus, tickMs: 0, now: () => state.now, loopGapMs: 0, log: { warn() {}, info() {} },
+  });
+
+  await manager.drain(); // 第 1 轮发出去
+  state.now += 1000;
+  fs.appendFileSync(file, JSON.stringify({
+    type: "message", role: "user", content: "等一下，我先说个别的", timestamp: state.now,
+  }) + "\n");
+  state.now += 1000;
+  await manager.drain();
+
+  assert.equal(bus.sent.length, 1, "用户接过话就不该再把循环推下去");
+  const item = readQueue(dataDir).items[0];
+  assert.equal(item.status, "skipped");
+  assert.match(item.skipReason, /循环就停在这儿/);
+  manager.stop();
+});
+
+test("QueueInsertManager：循环途中用户撤回 → 停住且不再发", async () => {
+  const dataDir = tmpDir();
+  const file = path.join(BASE, "loop-cancel.jsonl");
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, "");
+  const state = { now: Date.UTC(2026, 0, 1) };
+  const bus = loopBus(file, state);
+  const queued = enqueueInsert({}, { text: "继续推", sessionPath: file, rounds: 5 }, state.now).queue;
+  const id = queued.items[0].id;
+  seedQueue(dataDir, queued);
+  const manager = new QueueInsertManager({
+    dataDir, bus, tickMs: 0, now: () => state.now, loopGapMs: 0, log: { warn() {}, info() {} },
+  });
+
+  await manager.drain();
+  state.now += 1000;
+  const cancelled = await cancelUserInsert(dataDir, { id });
+  assert.equal(cancelled.ok, true, "循环排在待发时可以撤回");
+  state.now += 1000;
+  await manager.drain();
+
+  assert.equal(bus.sent.length, 1, "撤回了就不该再接着发");
+  assert.equal(readQueue(dataDir).items[0].status, "skipped");
+  manager.stop();
 });

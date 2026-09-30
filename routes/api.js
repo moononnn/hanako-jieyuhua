@@ -90,6 +90,21 @@ export default function registerPluginApiRoutes(app, ctx) {
         const curAsk = (getConfig(dataDir).askFlower) || {};
         if (typeof body.askFlower.enabled === "boolean") patch.askFlower = { ...curAsk, enabled: body.askFlower.enabled };
       }
+      // 断联续接两档 + 自动次数上限 + 循环轮数（2026-09-28）
+      if (body.resume && typeof body.resume === "object") {
+        const curResume = (getConfig(dataDir).resume) || {};
+        const next = { ...curResume };
+        if (body.resume.mode === "notify" || body.resume.mode === "auto") {
+          next.mode = body.resume.mode;
+          next.autoContinue = body.resume.mode === "auto";  // 派生字段，同步给旧调用点
+        }
+        const max = Number(body.resume.maxAuto);
+        if (Number.isFinite(max) && max >= 1 && max <= 10) next.maxAuto = Math.floor(max);
+        if (typeof body.resume.loopEnabled === "boolean") next.loopEnabled = body.resume.loopEnabled;
+        const rounds = Number(body.resume.loopRounds);
+        if (Number.isFinite(rounds) && rounds >= 1 && rounds <= 50) next.loopRounds = Math.floor(rounds);
+        patch.resume = next;
+      }
 
       const m = body.model || {};
       if (["agent", "hana", "custom"].includes(m.source)) {
