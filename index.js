@@ -473,9 +473,19 @@ export default class Plugin {
     }
     if (action === "stop") return this.stopContinueLoop(payload.sessionId, "悬浮球手动停止");
     if (action === "confirm") {
-      const state = payload.go === true ? this._loop.resumeAfterConfirm(payload.sessionId) : null;
-      if (payload.go !== true) this._loop.stop(payload.sessionId, "用户选择收工");
-      return { ok: Boolean(state) || payload.go !== true, state };
+      if (payload.go !== true) {
+        this._clearLoopTimer(payload.sessionId);
+        const stopped = this._loop.stop(payload.sessionId, "用户选择收工");
+        dbgResume(`[循环] 用户选择收工 session=${payload.sessionId}`);
+        return { ok: Boolean(stopped?.ok), state: null };
+      }
+      const state = this._loop.resumeAfterConfirm(payload.sessionId);
+      if (!state) return { ok: false, error: "这个对话没在等确认" };
+      // 光放行状态机 ta 不会自己接着说，得真把「继续哈」发出去。
+      // 走 _fireLoopContinue 是为了让它打上 _recentResumeSends 标记：否则这条自家消息
+      // 会被 session_user_message 当成用户插话，把刚放行的循环又停掉（2026-09-30 审查发现）。
+      void this._fireLoopContinue(payload.sessionId);
+      return { ok: true, state };
     }
     if (action === "state") {
       return { ok: true, state: this._loop.get(payload.sessionId) };

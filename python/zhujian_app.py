@@ -3504,6 +3504,7 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
     resume_auto_ready = pyqtSignal(object)
     loop_ready = pyqtSignal(object)
     loop_preferences_ready = pyqtSignal(object)
+    loop_finish_ready = pyqtSignal(object)
 
     def __init__(self, ball):
         super().__init__(None)
@@ -3561,6 +3562,7 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
         self.resume_continue_ready.connect(self._apply_resume_continue_result)
         self.loop_ready.connect(self._apply_loop_result)
         self.loop_preferences_ready.connect(self._apply_loop_preferences_result)
+        self.loop_finish_ready.connect(self._apply_loop_finish_result)
         self.resume_auto_ready.connect(self._apply_resume_auto_result)
         self.refresh_ready.connect(self._apply_async_refresh)
         self.target_ready.connect(self._apply_target_state)
@@ -3742,6 +3744,15 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
         self.btn_resume_continue.setToolTip("往这个窗口发一条「继续哈」，接上话头")
         self.btn_resume_continue.clicked.connect(self._continue_resume)
         resume_actions.addWidget(self.btn_resume_continue)
+        # 循环确认卡专用：ta 说了收工话时问的是「还接着吗」，得给一个收工的选择，
+        # 不能只剩「继续哈」把人逼着继续（2026-09-30 审查发现确认链路断开后补）。
+        self.btn_loop_finish = QPushButton("就到这吧")
+        self.btn_loop_finish.setObjectName("loopFinish")
+        self.btn_loop_finish.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_loop_finish.setToolTip("收工：不再自动接着往下续")
+        self.btn_loop_finish.clicked.connect(self._finish_loop_confirm)
+        self.btn_loop_finish.hide()
+        resume_actions.addWidget(self.btn_loop_finish)
         self.btn_resume_auto = QPushButton("断联：提醒我")
         self.btn_resume_auto.setObjectName("resumeAuto")
         self.btn_resume_auto.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -4588,8 +4599,9 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
         self.chk_loop_after_resume.setVisible(not is_loop_confirm)
         self.lbl_loop_rounds.setVisible(not is_loop_confirm)
         self.spin_loop.setVisible(not is_loop_confirm)
+        self.btn_loop_finish.setVisible(is_loop_confirm)
         self.btn_resume_continue.setEnabled(True)
-        self.btn_resume_continue.setText("继续哈")
+        self.btn_resume_continue.setText("接着来" if is_loop_confirm else "继续哈")
     def _save_loop_preferences(self, *_):
         enabled = self.chk_loop_after_resume.isChecked()
         rounds = self.spin_loop.value()
@@ -4625,7 +4637,8 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
         self.btn_resume_continue.setText("发送中…")
         resume = dict(self._resume_entry or {})
         resume_id = resume.get("resumeId") or ""
-        start_loop = self.chk_loop_after_resume.isChecked() and resume.get("source") != "loop_confirm"
+        is_loop_confirm = resume.get("source") == "loop_confirm"
+        start_loop = self.chk_loop_after_resume.isChecked() and not is_loop_confirm
         rounds = self.spin_loop.value()
         if start_loop:
             self._loop_session_path = str(resume.get("sessionPath") or "")
@@ -4634,21 +4647,40 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
             result = {"ok": False, "error": "连不上解语花，看看插件开着没"}
             loop_started = False
             try:
-                if start_loop:
-                    path = str(resume.get("sessionPath") or "")
-                    if not path:
-                        result = {"ok": False, "error": "找不到这段对话，暂时无法开启循环"}
-                        raise RuntimeError("missing sessionPath")
-                    started = api_post("/loop/start", {"sessionPath": path, "rounds": rounds}, timeout=8)
-                    if not started or not started.get("ok"):
-                        result = {"ok": False, "error": (started or {}).get("error") or "循环没能启动，再试一次"}
-                        raise RuntimeError("loop start failed")
-                    loop_started = True
-                data = api_post("/resume/continue", {"resumeId": resume_id}, timeout=20)
-                if data and data.get("ok"):
-                    result = {"ok": True, "loopStarted": loop_started, "rounds": rounds}
+                if is_loop_confirm:
+                    # 循环确认卡走专用路径：把「还接着吗」的答案交给插件，由它发「继续哈」并保住原循环。
+                    # 走普通 /resume/continue 会让这条自家消息被当成用户插话，刚放行的循环当场自杀
+                    # （2026-09-30 发布前审查发现）。
+                    loop_session = str(resume.get("sessionId") or "")
+                    if not loop_session:
+                        result = {"ok": False, "error": "找不到这段对话，循环接不回来"}
+                        raise RuntimeError("missing loop sessionId")
+                    confirmed = api_post("/loop/confirm", {"sessionId": loop_session, "go": True}, timeout=20)
+                    if not confirmed or not confirmed.get("ok"):
+                        result = {"ok": False, "error": (confirmed or {}).get("error") or "循环没能接回来，再试一次"}
+                        raise RuntimeError("loop confirm failed")
+                    result = {"ok": True, "loopConfirm": True, "rounds": 0}
+                    # 原待办还挂着，不收掉的话下一轮轮询又会把同一张卡弹出来。
+                    try:
+                        api_post("/resume/dismiss", {"resumeId": resume_id}, timeout=8)
+                    except Exception:
+                        pass
                 else:
-                    result = {"ok": False, "error": (data or {}).get("error") or "发送失败"}
+                    if start_loop:
+                        path = str(resume.get("sessionPath") or "")
+                        if not path:
+                            result = {"ok": False, "error": "找不到这段对话，暂时无法开启循环"}
+                            raise RuntimeError("missing sessionPath")
+                        started = api_post("/loop/start", {"sessionPath": path, "rounds": rounds}, timeout=8)
+                        if not started or not started.get("ok"):
+                            result = {"ok": False, "error": (started or {}).get("error") or "循环没能启动，再试一次"}
+                            raise RuntimeError("loop start failed")
+                        loop_started = True
+                    data = api_post("/resume/continue", {"resumeId": resume_id}, timeout=20)
+                    if data and data.get("ok"):
+                        result = {"ok": True, "loopStarted": loop_started, "rounds": rounds}
+                    else:
+                        result = {"ok": False, "error": (data or {}).get("error") or "发送失败"}
             except urllib.error.HTTPError as e:
                 try:
                     body = json.loads(e.read().decode("utf-8", "replace"))
@@ -4674,6 +4706,62 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
 
         threading.Thread(target=worker, daemon=True, name="zhujian-resume-continue").start()
 
+    def _finish_loop_confirm(self):
+        """循环确认卡的「就到这吧」：收掉循环，不发任何消息。"""
+        if not self.is_resume_open() or self._resume_responding:
+            return
+        self._resume_responding = True
+        self.btn_loop_finish.setEnabled(False)
+        self.btn_resume_continue.setEnabled(False)
+        resume = dict(self._resume_entry or {})
+        resume_id = resume.get("resumeId") or ""
+        loop_session = str(resume.get("sessionId") or "")
+
+        def worker():
+            result = {"ok": False, "error": "连不上解语花，看看插件开着没"}
+            try:
+                if loop_session:
+                    stopped = api_post("/loop/confirm", {"sessionId": loop_session, "go": False}, timeout=10)
+                    if not stopped or not stopped.get("ok"):
+                        result = {"ok": False, "error": (stopped or {}).get("error") or "没能收工，再试一次"}
+                        raise RuntimeError("loop finish failed")
+                result = {"ok": True, "loopStopped": True}
+                try:
+                    api_post("/resume/dismiss", {"resumeId": resume_id}, timeout=8)
+                except Exception:
+                    pass
+            except urllib.error.HTTPError as e:
+                try:
+                    body = json.loads(e.read().decode("utf-8", "replace"))
+                    result = {"ok": False, "error": body.get("error") or f"没能收工 ({e.code})"}
+                except Exception:
+                    result = {"ok": False, "error": f"没能收工 ({e.code})"}
+            except RuntimeError:
+                pass
+            except Exception:
+                pass
+            if self._closed:
+                return
+            try:
+                self.loop_finish_ready.emit(result)
+            except RuntimeError:
+                pass
+
+        threading.Thread(target=worker, daemon=True, name="zhujian-loop-finish").start()
+
+    def _apply_loop_finish_result(self, payload):
+        if not self.is_resume_open():
+            return
+        self._resume_responding = False
+        if not payload.get("ok"):
+            self.btn_loop_finish.setEnabled(True)
+            self.btn_resume_continue.setEnabled(True)
+            self.lbl_resume_reason.setText(f"没能收工：{payload.get('error') or '再试一次'}")
+            return
+        self._flash("已收工 · 循环停了")
+        self._resume_finished = True
+        QTimer.singleShot(650, self.finish_resume_and_collapse)
+
     def _apply_resume_continue_result(self, payload):
         if not self.is_resume_open():
             return
@@ -4683,7 +4771,10 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
             self.btn_resume_continue.setText("继续哈")
             self.lbl_resume_reason.setText(f"发送失败：{payload.get('error') or '再试一次'}")
             return
-        self._flash("已发送 · 继续哈" + (f" · 循环最多 {payload.get('rounds')} 轮" if payload.get("loopStarted") else ""))
+        if payload.get("loopConfirm"):
+            self._flash("已接上 · 循环继续跑")
+        else:
+            self._flash("已发送 · 继续哈" + (f" · 循环最多 {payload.get('rounds')} 轮" if payload.get("loopStarted") else ""))
         self._resume_finished = True
         # 已让窗口继续：短暂反馈后收起回悬浮球（下一轮轮询也收不到这条了）
         QTimer.singleShot(650, self.finish_resume_and_collapse)

@@ -23,7 +23,9 @@ import path from "node:path";
 import {
   DEFAULT_CONFIG,
   checkResumeAutoAllowed,
+  createResumePending,
   getConfig,
+  listResumePending,
   markResumeAutoFired,
   normalizeConfig,
   resetResumeConsecutive,
@@ -281,4 +283,34 @@ test("旧数据只有布尔开关时按旧语义折算，不丢用户设置", ()
   assert.equal(cfg2.resume.mode, "notify");
   const cfg3 = normalizeConfig({ resume: { mode: "auto" } });
   assert.equal(cfg3.resume.mode, "auto");
+});
+
+// ── 循环确认卡的 source 标记（2026-09-30 发布前审查发现）──
+// 回归背景：createResumePending 和归一化原本只认 stuck_turn，loop_confirm 被清成空串。
+// 面板靠这个标记认出「循环跑到收工话」，认不出就只能当普通断联处理，
+// 用户点「继续哈」只是发了一句话，原循环接不回来。
+
+test("循环确认待办的 source 标记落盘后必须保住", async () => {
+  const dir = tmpDir();
+  const created = await createResumePending(dir, {
+    agentId: "hanako",
+    sessionId: "s1",
+    sessionPath: "C:\\sessions\\s1.jsonl",
+    reason: "ta 好像做完了",
+    source: "loop_confirm",
+  });
+  assert.equal(created.entry.source, "loop_confirm");
+  const listed = listResumePending(dir);
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0].source, "loop_confirm", "归一化不能把 loop_confirm 清成空串");
+});
+
+test("断联待办仍是 stuck_turn，未知来源仍清空", async () => {
+  const dir = tmpDir();
+  await createResumePending(dir, { sessionId: "s2", sessionPath: "C:\\sessions\\s2.jsonl", source: "stuck_turn" });
+  await createResumePending(dir, { sessionId: "s3", sessionPath: "C:\\sessions\\s3.jsonl", source: "乱填的" });
+  const listed = listResumePending(dir);
+  const byId = (sid) => listed.find((item) => item.sessionId === sid);
+  assert.equal(byId("s2").source, "stuck_turn");
+  assert.equal(byId("s3").source, "", "未知来源仍应清空，不能因为修了 loop_confirm 就来者不拒");
 });

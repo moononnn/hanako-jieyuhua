@@ -32,7 +32,8 @@
       "note3-prev-api.askdiandian.com",
       "generativelanguage.googleapis.com",
       "cli-chat-proxy.grok.com",
-      "chatgpt.com"
+      "chatgpt.com",
+      "api.github.com"
     ],
     "methods": [
       "GET",

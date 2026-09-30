@@ -144,6 +144,86 @@ class ResumeCardTests(QtTestCase):
             ball.close()
             app.processEvents()
 
+    # ── 循环确认卡的真实接线（2026-09-30 发布前审查发现链路断开后补）──
+    # 修复前：面板一律走 /resume/continue，既不调 /loop/confirm，也不留收工选项。
+    # 那样用户点「继续哈」只是发了一句话，插件收不到答案，循环接不回来。
+
+    def test_loop_confirm_card_offers_finish_and_relabels_continue(self):
+        app, ball, panel = self._make_panel()
+        try:
+            panel.show_resume(self._resume_entry(source="loop_confirm", reason="ta 好像做完了"))
+            app.processEvents()
+            self.assertFalse(panel.btn_loop_finish.isHidden())
+            self.assertEqual(panel.btn_resume_continue.text(), "接着来")
+        finally:
+            panel.close()
+            ball.close()
+            app.processEvents()
+
+    def test_normal_resume_card_hides_loop_finish(self):
+        app, ball, panel = self._make_panel()
+        try:
+            panel.show_resume(self._resume_entry(source="stuck_turn"))
+            app.processEvents()
+            self.assertTrue(panel.btn_loop_finish.isHidden())
+            self.assertEqual(panel.btn_resume_continue.text(), "继续哈")
+        finally:
+            panel.close()
+            ball.close()
+            app.processEvents()
+
+    def test_loop_confirm_continue_calls_loop_confirm_not_resume_continue(self):
+        app, ball, panel = self._make_panel()
+        calls = []
+        def fake_api_post(url, payload, timeout=0):
+            calls.append((url, payload))
+            return {"ok": True}
+        try:
+            panel.show_resume(self._resume_entry(source="loop_confirm"))
+            with patch.object(zhujian, "api_post", side_effect=fake_api_post):
+                panel._continue_resume()
+                wait_loop = QEventLoop()
+                zhujian.QTimer.singleShot(250, wait_loop.quit)
+                wait_loop.exec()
+                app.processEvents()
+            urls = [call[0] for call in calls]
+            self.assertIn("/loop/confirm", urls)
+            self.assertNotIn("/resume/continue", urls, "循环确认卡不能走普通断联发送，否则循环接不回来")
+            self.assertNotIn("/loop/start", urls, "循环本来就在跑，不能当成新循环重启")
+            confirm = next(call for call in calls if call[0] == "/loop/confirm")
+            self.assertTrue(confirm[1]["go"])
+            self.assertEqual(confirm[1]["sessionId"], "s1")
+            self.assertIn("/resume/dismiss", urls, "原待办要收掉，否则下一轮又弹同一张卡")
+            self.assertTrue(panel._resume_finished)
+        finally:
+            panel.close()
+            ball.close()
+            app.processEvents()
+
+    def test_loop_finish_button_stops_loop_without_sending_message(self):
+        app, ball, panel = self._make_panel()
+        calls = []
+        def fake_api_post(url, payload, timeout=0):
+            calls.append((url, payload))
+            return {"ok": True}
+        try:
+            panel.show_resume(self._resume_entry(source="loop_confirm"))
+            with patch.object(zhujian, "api_post", side_effect=fake_api_post):
+                panel._finish_loop_confirm()
+                wait_loop = QEventLoop()
+                zhujian.QTimer.singleShot(250, wait_loop.quit)
+                wait_loop.exec()
+                app.processEvents()
+            urls = [call[0] for call in calls]
+            self.assertNotIn("/resume/continue", urls, "收工不发任何消息")
+            confirm = next(call for call in calls if call[0] == "/loop/confirm")
+            self.assertFalse(confirm[1]["go"], "go=false 才是收工")
+            self.assertIn("/resume/dismiss", urls)
+        finally:
+            panel.close()
+            ball.close()
+            app.processEvents()
+
     def test_stuck_turn_resume_renders_card_head(self):
         app, ball, panel = self._make_panel()
         try:
