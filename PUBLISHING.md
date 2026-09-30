@@ -5,6 +5,7 @@
 ## 1. 固定信息
 
 - GitHub 仓库：`moononnn/hanako-jieyuhua`
+- 外传白名单：产品名「解语花」、平台名「Hana / HanaAgent」、公开 owner `moononnn`、署名 `moononnn & 小花`；唯一允许对外出现的伙伴名称为「小花」；公开仓库地址为 `https://github.com/moononnn/hanako-jieyuhua`。其他私人姓名、伙伴名称、真实邮箱和本机路径均不得外传。
 - 默认分支：`main`
 - 版本唯一来源：`manifest.json` 的 `version`
 - Git tag：`v<manifest.version>`
@@ -59,6 +60,8 @@ node <plugin-dev-guide>/scripts/check-file-budget.js
 
 本仓库的文件预算脚本位于插件开发 skill；若项目目录没有 `scripts/check-file-budget.js`，使用已安装 skill 中的脚本路径。
 
+Windows 上运行 Python 测试前设置 `PYTHONDONTWRITEBYTECODE=1`；语法检查用下面的内存编译，不运行会写入 `__pycache__` 的 `py_compile`。
+
 还要运行：
 
 ```powershell
@@ -67,7 +70,7 @@ node --check lib/zhujian.js
 node --check routes/api.js
 node --check routes/ui.js
 node --check tests/ask-flower.test.js
-python -m py_compile python/zhujian_app.py
+python -c "from pathlib import Path; compile(Path('python/zhujian_app.py').read_text(encoding='utf-8'), 'python/zhujian_app.py', 'exec')"
 git diff --check
 ```
 
