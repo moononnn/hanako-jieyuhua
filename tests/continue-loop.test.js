@@ -20,6 +20,8 @@ import {
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+
+const { sendResumeContinue } = await import("../lib/zhujian.js");
 import {
   DEFAULT_CONFIG,
   checkResumeAutoAllowed,
@@ -311,6 +313,33 @@ test("循环确认待办的 source 标记落盘后必须保住", async () => {
 // 改成 start 时由 _fireLoopContinue 发，并传 countRound:false 让首条不吃轮数配额。
 // 这条用源码断言代替实例化：index.js 依赖 ctx.bus 与宿主事件，实例化成本远大于收益。
 
+test("会话没了 vs 这次没发出去，要分得清（2026-09-30 发布前审查实测）", async () => {
+  // 早先把 notFound 写成「错误里含 manifest 就算」，结果 manifest cache temporarily unavailable
+  // 这类瞬时错误也被当成对话已删：循环停掉、不建提示卡，用户什么都收不到。
+  const dir = tmpDir();
+  const busWith = (error) => ({ request: async () => ({ ok: false, error }) });
+
+  const gone = await sendResumeContinue(dir, busWith("Session manifest not found"), { sessionPath: "C:\\s\\s1.jsonl" });
+  assert.equal(gone.notFound, true, "会话确实没了要标出来");
+
+  const alsoGone = await sendResumeContinue(dir, busWith("no such session"), { sessionPath: "C:\\s\\s1.jsonl" });
+  assert.equal(alsoGone.notFound, true);
+
+  const chinese = await sendResumeContinue(dir, busWith("找不到目标会话"), { sessionPath: "C:\\s\\s1.jsonl" });
+  assert.equal(chinese.notFound, true);
+
+  // 下面这些是瞬时故障，对话还在，不许当成已删除
+  for (const transient of [
+    "manifest cache temporarily unavailable",
+    "网络连接断了",
+    "窗口没回应，可能是正在忙或者已经睡了",
+    "Session manifest not ready",
+  ]) {
+    const result = await sendResumeContinue(dir, busWith(transient), { sessionPath: "C:\\s\\s1.jsonl" });
+    assert.equal(result.notFound, undefined, `瞬时故障不该标成会话没了：${transient}`);
+  }
+});
+
 test("启动循环的首条由插件自己发，且不计入轮数", () => {
   const source = fs.readFileSync(path.join(import.meta.dirname, "..", "index.js"), "utf-8");
   assert.match(
@@ -346,7 +375,9 @@ test("会话没了的语义要传到调用方，否则会对着已删的对话�
 test("旧待办由插件在首条真的发出后才消费", () => {
   const source = fs.readFileSync(path.join(import.meta.dirname, "..", "index.js"), "utf-8");
   assert.match(source, /consumeResumeId: String\(payload\.resumeId \|\| ""\)/, "start 要把原待办编号交给首条发送路径");
-  assert.match(source, /if \(consumeResumeId\) \{[\s\S]{0,240}?await consumeResume\(this\._dataDir, consumeResumeId\);/, "消费必须发生在发送成功之后");
+  assert.match(source, /if \(consumeResumeId\) \{[\s\S]{0,900}?await consumeResume\(this\._dataDir, consumeResumeId\);/, "消费必须发生在发送成功之后");
+  // 消费失败要有兜底：已经接上话却把卡留在 30 分钟 TTL 里，用户每点一次就重发一遍。
+  assert.match(source, /if \(!consumed\) await dismissResumeBySession\(this\._dataDir, sessionId\);/, "按 resumeId 消费失败时改按会话清理");
   // 消费要排在发送成功分支里：失败分支不能消费，否则用户既没旧卡也没新待办。
   const failBranch = source.slice(source.indexOf("sessionGone = Boolean"), source.indexOf("} catch (error)"));
   assert.doesNotMatch(failBranch, /consumeResume\(/, "失败分支不得消费待办");

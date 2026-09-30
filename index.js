@@ -356,7 +356,18 @@ export default class Plugin {
         if (consumeResumeId) {
           // 首条真的发出去了，才把那张旧卡收掉。提前消费的话，发送失败时用户既看不到旧卡
           // 也看不到新建的待办，等于什么提示都没留下（2026-09-30 发布前审查发现的竞态）。
-          await consumeResume(this._dataDir, consumeResumeId);
+          // 消费失败也别留着它：已经接上的话在 30 分钟 TTL 里反复弹卡，用户每点一次就重发一遍。
+          // 退一步按会话清，两条路径不一样，至少能命中一条。
+          try {
+            const consumed = await consumeResume(this._dataDir, consumeResumeId);
+            if (!consumed) await dismissResumeBySession(this._dataDir, sessionId);
+          } catch (error) {
+            try {
+              await dismissResumeBySession(this._dataDir, sessionId);
+            } catch {
+              this.ctx.log?.warn?.("[解语花] 续接待办未收起，可能重复弹卡", { sessionId });
+            }
+          }
         }
         return;
       }
