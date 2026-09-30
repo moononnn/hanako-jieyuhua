@@ -4678,6 +4678,12 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
                         loop_started = True
                         # 首条「继续哈」由插件自己发（index.js 在 start 时就发），这里绝不能再发一遍：
                         # 代理发的消息打不上「自家发送」标记，会被当成用户插话把新循环当场停掉。
+                        # 原待办要立即消费掉：finish_resume_and_collapse 会先清空 _resume_entry 再收起，
+                        # 后续关闭路径就不会再替它 dismiss，轮询可能把旧卡重新弹出来。
+                        try:
+                            api_post("/resume/dismiss", {"resumeId": resume_id}, timeout=8)
+                        except Exception:
+                            pass
                         result = {"ok": True, "loopStarted": True, "rounds": rounds}
                     else:
                         data = api_post("/resume/continue", {"resumeId": resume_id}, timeout=20)
@@ -4777,8 +4783,12 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
             return
         if payload.get("loopConfirm"):
             self._flash("已接上 · 循环继续跑")
+        elif payload.get("loopStarted"):
+            # 首条是插件异步发的，这里只能说「正在接上话头」，不能报「已发送」：
+            # 真发不出去时启动接口已经返回过了，只能靠插件弹的待办告知用户。
+            self._flash(f"循环已开启 · 正在接上话头 · 最多 {payload.get('rounds')} 轮")
         else:
-            self._flash("已发送 · 继续哈" + (f" · 循环最多 {payload.get('rounds')} 轮" if payload.get("loopStarted") else ""))
+            self._flash("已发送 · 继续哈")
         self._resume_finished = True
         # 已让窗口继续：短暂反馈后收起回悬浮球（下一轮轮询也收不到这条了）
         QTimer.singleShot(650, self.finish_resume_and_collapse)

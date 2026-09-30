@@ -356,15 +356,23 @@ export default class Plugin {
       }
       this._recentResumeSends.delete(sessionId);
       // 发不出去就不再纠缠：回落成待办弹窗，跟断联续接一样的处理。
-      if (result?.notFound) this._loop?.stop(sessionId, "会话没了");
-      else await createResumePending(this._dataDir, {
-        agentId: state.agentId,
-        sessionId,
-        sessionPath: state.sessionPath,
-        reason: "循环续接没发出去",
-      });
+      const sessionGone = Boolean(result?.notFound);
+      // 刚启动的首条没发出去的话，循环就没人接着跑了，留着 running 状态只会变成僵尸
+      // （启动接口早已返回成功，用户看不到后续），直接停掉让弹窗里的待办接管。
+      if (sessionGone || !countRound) {
+        this._loop?.stop(sessionId, sessionGone ? "会话没了" : "首条没发出去，循环没起来");
+      }
+      if (!sessionGone) {
+        await createResumePending(this._dataDir, {
+          agentId: state.agentId,
+          sessionId,
+          sessionPath: state.sessionPath,
+          reason: countRound ? "循环续接没发出去" : "循环没能启动，续接没发出去",
+        });
+      }
     } catch (error) {
       this._recentResumeSends.delete(sessionId);
+      if (!countRound) this._loop?.stop(sessionId, "首条没发出去，循环没起来");
       this.ctx.log?.warn?.("[解语花] 循环续接异常", { sessionId, error: error?.message || String(error) });
     }
   }

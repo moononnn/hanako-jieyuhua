@@ -326,6 +326,14 @@ test("启动循环的首条由插件自己发，且不计入轮数", () => {
   assert.match(source, /if \(countRound\) \{\s*const after = this\._loop\.markFired/, "只有计入轮数时才 markFired");
 });
 
+test("首条发不出去时不留僵尸循环", () => {
+  // 启动接口早已返回成功，首条是异步发的；它要是失败而循环还挂着 running，
+  // 就成了一个没人推进的僵尸状态，界面上再也等不到结果。
+  const source = fs.readFileSync(path.join(import.meta.dirname, "..", "index.js"), "utf-8");
+  assert.match(source, /if \(sessionGone \|\| !countRound\) \{\s*this\._loop\?\.stop/, "首条失败必须停掉循环");
+  assert.match(source, /if \(!countRound\) this\._loop\?\.stop/, "首条抛异常时同样要停");
+});
+
 test("确认继续也走自带标记的发送路径", () => {
   const source = fs.readFileSync(path.join(import.meta.dirname, "..", "index.js"), "utf-8");
   assert.match(

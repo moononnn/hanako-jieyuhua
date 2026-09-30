@@ -303,9 +303,10 @@ class ResumeCardTests(QtTestCase):
                 zhujian.QTimer.singleShot(250, wait_loop.quit)
                 wait_loop.exec()
                 app.processEvents()
-            self.assertEqual([call[0] for call in calls], ["/loop/start"])
+            self.assertEqual([call[0] for call in calls], ["/loop/start", "/resume/dismiss"])
             self.assertNotIn("/resume/continue", [call[0] for call in calls], "首条由插件发，代理重复发会被当用户插话")
             self.assertEqual(calls[0][1]["rounds"], 7)
+            self.assertEqual(calls[1][1]["resumeId"], "resume_test1", "原待办必须立即消费，否则轮询会重弹旧卡")
             self.assertTrue(panel._resume_finished)
         finally:
             panel.close()
