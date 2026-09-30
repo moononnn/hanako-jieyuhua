@@ -4671,19 +4671,15 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
                         if not path:
                             result = {"ok": False, "error": "找不到这段对话，暂时无法开启循环"}
                             raise RuntimeError("missing sessionPath")
-                        started = api_post("/loop/start", {"sessionPath": path, "rounds": rounds}, timeout=8)
+                        started = api_post("/loop/start", {"sessionPath": path, "rounds": rounds, "resumeId": resume_id}, timeout=8)
                         if not started or not started.get("ok"):
                             result = {"ok": False, "error": (started or {}).get("error") or "循环没能启动，再试一次"}
                             raise RuntimeError("loop start failed")
                         loop_started = True
                         # 首条「继续哈」由插件自己发（index.js 在 start 时就发），这里绝不能再发一遍：
                         # 代理发的消息打不上「自家发送」标记，会被当成用户插话把新循环当场停掉。
-                        # 原待办要立即消费掉：finish_resume_and_collapse 会先清空 _resume_entry 再收起，
-                        # 后续关闭路径就不会再替它 dismiss，轮询可能把旧卡重新弹出来。
-                        try:
-                            api_post("/resume/dismiss", {"resumeId": resume_id}, timeout=8)
-                        except Exception:
-                            pass
+                        # 原待办也不在这里消费：交给插件在首条真的发出后才收，否则发送失败时
+                        # 旧卡已被吃掉、新待办又还没建，用户等于什么提示都没收到。
                         result = {"ok": True, "loopStarted": True, "rounds": rounds}
                     else:
                         data = api_post("/resume/continue", {"resumeId": resume_id}, timeout=20)

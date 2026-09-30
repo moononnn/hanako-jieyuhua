@@ -17,6 +17,7 @@ import {
   bumpResumeConsecutive,
   checkResumeAutoAllowed,
   createResumePending,
+  consumeResume,
   dismissResumeBySession,
   getConfig,
   markResumeAutoFired,
@@ -333,7 +334,7 @@ export default class Plugin {
     this._fireLoopContinue(sessionId);
   }
 
-  async _fireLoopContinue(sessionId, { countRound = true } = {}) {
+  async _fireLoopContinue(sessionId, { countRound = true, consumeResumeId = "" } = {}) {
     const state = this._loop?.get(sessionId);
     if (!state) return;
     this._recentResumeSends.set(sessionId, Date.now());
@@ -351,6 +352,11 @@ export default class Plugin {
               title: `🔁 ${after.total} 轮跑完了`,
             });
           }
+        }
+        if (consumeResumeId) {
+          // 首条真的发出去了，才把那张旧卡收掉。提前消费的话，发送失败时用户既看不到旧卡
+          // 也看不到新建的待办，等于什么提示都没留下（2026-09-30 发布前审查发现的竞态）。
+          await consumeResume(this._dataDir, consumeResumeId);
         }
         return;
       }
@@ -486,7 +492,10 @@ export default class Plugin {
       // 「自家发送」标记，index.js 会把它当成用户插话，把刚建的循环当场删掉——
       // 2026-09-30 发布前审查用解压副本实测复现过。
       if (result?.ok && payload.primeSend !== false) {
-        void this._fireLoopContinue(payload.sessionId, { countRound: false });
+        void this._fireLoopContinue(payload.sessionId, {
+          countRound: false,
+          consumeResumeId: String(payload.resumeId || ""),
+        });
       }
       return result;
     }

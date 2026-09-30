@@ -315,13 +315,13 @@ test("启动循环的首条由插件自己发，且不计入轮数", () => {
   const source = fs.readFileSync(path.join(import.meta.dirname, "..", "index.js"), "utf-8");
   assert.match(
     source,
-    /void this\._fireLoopContinue\(payload\.sessionId, \{ countRound: false \}\)/,
+    /void this\._fireLoopContinue\(payload\.sessionId, \{[\s\S]{0,120}?countRound: false,[\s\S]{0,120}?consumeResumeId: String\(payload\.resumeId \|\| ""\),[\s\S]{0,40}?\}\)/,
     "start 分支必须自己发首条；把发送权还给悬浮球代理会让新循环被当成用户插话当场停掉"
   );
   assert.match(
     source,
-    /async _fireLoopContinue\(sessionId, \{ countRound = true \} = \{\}\)/,
-    "_fireLoopContinue 需要支持不计入轮数的首条"
+    /async _fireLoopContinue\(sessionId, \{ countRound = true, consumeResumeId = "" \} = \{\}\)/,
+    "_fireLoopContinue 需要支持不计入轮数的首条，以及成功后消费旧待办"
   );
   assert.match(source, /if \(countRound\) \{\s*const after = this\._loop\.markFired/, "只有计入轮数时才 markFired");
 });
@@ -332,6 +332,24 @@ test("首条发不出去时不留僵尸循环", () => {
   const source = fs.readFileSync(path.join(import.meta.dirname, "..", "index.js"), "utf-8");
   assert.match(source, /if \(sessionGone \|\| !countRound\) \{\s*this\._loop\?\.stop/, "首条失败必须停掉循环");
   assert.match(source, /if \(!countRound\) this\._loop\?\.stop/, "首条抛异常时同样要停");
+});
+
+test("会话没了的语义要传到调用方，否则会对着已删的对话弹卡", () => {
+  const source = fs.readFileSync(path.join(import.meta.dirname, "..", "lib", "zhujian.js"), "utf-8");
+  assert.match(
+    source,
+    /return notFound \? \{ ok: false, error: message, notFound: true \} : \{ ok: false, error: message \};/,
+    "sendResumeContinue 必须把 notFound 传给调用方；丢了它，index.js 的 sessionGone 永远为假"
+  );
+});
+
+test("旧待办由插件在首条真的发出后才消费", () => {
+  const source = fs.readFileSync(path.join(import.meta.dirname, "..", "index.js"), "utf-8");
+  assert.match(source, /consumeResumeId: String\(payload\.resumeId \|\| ""\)/, "start 要把原待办编号交给首条发送路径");
+  assert.match(source, /if \(consumeResumeId\) \{[\s\S]{0,240}?await consumeResume\(this\._dataDir, consumeResumeId\);/, "消费必须发生在发送成功之后");
+  // 消费要排在发送成功分支里：失败分支不能消费，否则用户既没旧卡也没新待办。
+  const failBranch = source.slice(source.indexOf("sessionGone = Boolean"), source.indexOf("} catch (error)"));
+  assert.doesNotMatch(failBranch, /consumeResume\(/, "失败分支不得消费待办");
 });
 
 test("确认继续也走自带标记的发送路径", () => {
