@@ -4676,11 +4676,15 @@ class ZhujianMenu(FadeOnLeaveMixin, QFrame):
                             result = {"ok": False, "error": (started or {}).get("error") or "循环没能启动，再试一次"}
                             raise RuntimeError("loop start failed")
                         loop_started = True
-                    data = api_post("/resume/continue", {"resumeId": resume_id}, timeout=20)
-                    if data and data.get("ok"):
-                        result = {"ok": True, "loopStarted": loop_started, "rounds": rounds}
+                        # 首条「继续哈」由插件自己发（index.js 在 start 时就发），这里绝不能再发一遍：
+                        # 代理发的消息打不上「自家发送」标记，会被当成用户插话把新循环当场停掉。
+                        result = {"ok": True, "loopStarted": True, "rounds": rounds}
                     else:
-                        result = {"ok": False, "error": (data or {}).get("error") or "发送失败"}
+                        data = api_post("/resume/continue", {"resumeId": resume_id}, timeout=20)
+                        if data and data.get("ok"):
+                            result = {"ok": True, "loopStarted": loop_started, "rounds": rounds}
+                        else:
+                            result = {"ok": False, "error": (data or {}).get("error") or "发送失败"}
             except urllib.error.HTTPError as e:
                 try:
                     body = json.loads(e.read().decode("utf-8", "replace"))

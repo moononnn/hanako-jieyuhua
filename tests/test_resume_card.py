@@ -283,7 +283,12 @@ class ResumeCardTests(QtTestCase):
             ball.close()
             app.processEvents()
 
-    def test_continue_with_loop_starts_loop_before_sending_resume(self):
+    def test_continue_with_loop_starts_loop_only(self):
+        """勾选循环时，代理发完 /loop/start 就收手。
+
+        首条「继续哈」由 index.js 在 start 时自己发（2026-09-30 审查修复）：
+        代理再发一次既会重复发送，也会因打不上「自家发送」标记被当成用户插话停掉新循环。
+        """
         app, ball, panel = self._make_panel()
         calls = []
         def fake_api_post(url, payload, timeout=0):
@@ -298,7 +303,8 @@ class ResumeCardTests(QtTestCase):
                 zhujian.QTimer.singleShot(250, wait_loop.quit)
                 wait_loop.exec()
                 app.processEvents()
-            self.assertEqual([call[0] for call in calls], ["/loop/start", "/resume/continue"])
+            self.assertEqual([call[0] for call in calls], ["/loop/start"])
+            self.assertNotIn("/resume/continue", [call[0] for call in calls], "首条由插件发，代理重复发会被当用户插话")
             self.assertEqual(calls[0][1]["rounds"], 7)
             self.assertTrue(panel._resume_finished)
         finally:

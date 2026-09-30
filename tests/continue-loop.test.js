@@ -305,6 +305,36 @@ test("循环确认待办的 source 标记落盘后必须保住", async () => {
   assert.equal(listed[0].source, "loop_confirm", "归一化不能把 loop_confirm 清成空串");
 });
 
+// ── 启动循环时首条「继续哈」必须由插件自己发（2026-09-30 发布前审查实测复现）──
+// 修复前：面板先 /loop/start 再走普通 /resume/continue 发首条，那条消息打不上
+// 「自家发送」标记，index.js 判定为用户插话，把刚建的循环当场删掉，循环根本跑不起来。
+// 改成 start 时由 _fireLoopContinue 发，并传 countRound:false 让首条不吃轮数配额。
+// 这条用源码断言代替实例化：index.js 依赖 ctx.bus 与宿主事件，实例化成本远大于收益。
+
+test("启动循环的首条由插件自己发，且不计入轮数", () => {
+  const source = fs.readFileSync(path.join(import.meta.dirname, "..", "index.js"), "utf-8");
+  assert.match(
+    source,
+    /void this\._fireLoopContinue\(payload\.sessionId, \{ countRound: false \}\)/,
+    "start 分支必须自己发首条；把发送权还给悬浮球代理会让新循环被当成用户插话当场停掉"
+  );
+  assert.match(
+    source,
+    /async _fireLoopContinue\(sessionId, \{ countRound = true \} = \{\}\)/,
+    "_fireLoopContinue 需要支持不计入轮数的首条"
+  );
+  assert.match(source, /if \(countRound\) \{\s*const after = this\._loop\.markFired/, "只有计入轮数时才 markFired");
+});
+
+test("确认继续也走自带标记的发送路径", () => {
+  const source = fs.readFileSync(path.join(import.meta.dirname, "..", "index.js"), "utf-8");
+  assert.match(
+    source,
+    /void this\._fireLoopContinue\(payload\.sessionId\);/,
+    "confirm 放行后要走 _fireLoopContinue，否则自家消息被当用户插话"
+  );
+});
+
 test("断联待办仍是 stuck_turn，未知来源仍清空", async () => {
   const dir = tmpDir();
   await createResumePending(dir, { sessionId: "s2", sessionPath: "C:\\sessions\\s2.jsonl", source: "stuck_turn" });

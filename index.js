@@ -333,20 +333,24 @@ export default class Plugin {
     this._fireLoopContinue(sessionId);
   }
 
-  async _fireLoopContinue(sessionId) {
+  async _fireLoopContinue(sessionId, { countRound = true } = {}) {
     const state = this._loop?.get(sessionId);
     if (!state) return;
     this._recentResumeSends.set(sessionId, Date.now());
     try {
       const result = await sendResumeContinue(this._dataDir, this.ctx.bus, { sessionPath: state.sessionPath });
       if (result?.ok) {
-        const after = this._loop.markFired(sessionId);
-        dbgResume(`[循环] 已续 session=${sessionId} 轮次=${after?.done ?? "?"}/${after?.total ?? "?"}`);
-        if (after?.exhausted) {
-          pushResumeNotice(this._dataDir, {
-            agentName: state.agentName || "",
-            title: `🔁 ${after.total} 轮跑完了`,
-          });
+        // countRound=false 用于刚启动循环时的首条：那条是“把话头接回来”，
+        // 不该吃掉一轮配额，轮数从 ta 回完第一轮之后开始算。
+        if (countRound) {
+          const after = this._loop.markFired(sessionId);
+          dbgResume(`[循环] 已续 session=${sessionId} 轮次=${after?.done ?? "?"}/${after?.total ?? "?"}`);
+          if (after?.exhausted) {
+            pushResumeNotice(this._dataDir, {
+              agentName: state.agentName || "",
+              title: `🔁 ${after.total} 轮跑完了`,
+            });
+          }
         }
         return;
       }
@@ -462,7 +466,7 @@ export default class Plugin {
       const cfg = getConfig(this._dataDir);
       const rounds = normalizeLoopRounds(payload.rounds) || cfg.resume?.loopRounds || 0;
       if (!rounds) return { ok: false, error: "先在续接弹窗里设置循环轮数" };
-      return this._loop.start({
+      const result = this._loop.start({
         sessionId: payload.sessionId,
         sessionPath: payload.sessionPath,
         agentId: payload.agentId,
@@ -470,6 +474,13 @@ export default class Plugin {
         title: payload.title,
         rounds,
       });
+      // 首条「继续哈」必须由插件自己发。悬浮球代理直接 /resume/continue 发消息时打不上
+      // 「自家发送」标记，index.js 会把它当成用户插话，把刚建的循环当场删掉——
+      // 2026-09-30 发布前审查用解压副本实测复现过。
+      if (result?.ok && payload.primeSend !== false) {
+        void this._fireLoopContinue(payload.sessionId, { countRound: false });
+      }
+      return result;
     }
     if (action === "stop") return this.stopContinueLoop(payload.sessionId, "悬浮球手动停止");
     if (action === "confirm") {
