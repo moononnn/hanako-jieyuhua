@@ -232,6 +232,7 @@ function renderSettingsPage(c, ctx, dataDir) {
     version,
     presentation: cfg.presentation || "card",
     mode: cfg.mode,
+    replySummaryFrequency: cfg.replySummaryFrequency || "standard",
     count: cfg.count,
     action: cfg.action,
     styles: cfg.styles || [],
@@ -369,6 +370,8 @@ ${hanaCss ? `<link rel="stylesheet" href="${escapeAttr(hanaCss)}">` : ""}
     padding: 7px 10px;
   }
   .dgh-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .dgh-resume-limit-row > .dgh-sub { margin-bottom: 0; line-height: 1.2; }
+  .dgh-resume-limit-row .dgh-input { width: 72px; height: 28px; padding: 2px 8px; line-height: 1.2; border-radius: 8px; }
   .dgh-btn {
     font-family: inherit; font-size: 13px;
     color: var(--dgh-paper);
@@ -649,6 +652,14 @@ ${hanaCss ? `<link rel="stylesheet" href="${escapeAttr(hanaCss)}">` : ""}
     ${radio("mode", "auto", cfg.mode === "auto", "看情况推荐", "助手觉得这轮聊完你可能想接话时才出，不打扰；但出不出看模型的自觉，偶尔可能整轮都没卡")}
   </div>
 
+  <div class="dgh-card" id="dgh-summary-frequency-card">
+    <div class="dgh-card-title">速览出现频率</div>
+    <div class="dgh-sub">速览只放在完整回复的最后。字数是大概参照，内容层次也会影响是否出现。</div>
+    ${radio("replySummaryFrequency", "less", cfg.replySummaryFrequency === "less", "少一点", "特别长或层次很多时才加，大约 800 字以上")}
+    ${radio("replySummaryFrequency", "standard", cfg.replySummaryFrequency === "standard", "标准", "默认档；偏长或需要展开几层时加，大约 500 字以上")}
+    ${radio("replySummaryFrequency", "more", cfg.replySummaryFrequency === "more", "多一点", "有几个需要分别说明的重点时就加，大约 300 字以上")}
+  </div>
+
   <div class="dgh-card">
     <div class="dgh-card-title">推荐几条</div>
     ${radio("count", "2", cfg.count === 2, "2 条")}
@@ -707,9 +718,9 @@ ${hanaCss ? `<link rel="stylesheet" href="${escapeAttr(hanaCss)}">` : ""}
       <button class="dgh-btn ghost" id="dgh-resume-mode" type="button">断联：提醒我</button>
       <span class="dgh-sub" id="dgh-resume-hint"></span>
     </div>
-    <div class="dgh-row" style="margin-top:10px; gap:8px; align-items:center">
+    <div class="dgh-row dgh-resume-limit-row" style="margin-top:10px; gap:8px; align-items:center">
       <span class="dgh-sub">自动接着最多发</span>
-      <input class="dgh-input" id="dgh-max-auto" type="number" min="1" max="10" style="width:72px">
+      <input class="dgh-input" id="dgh-max-auto" type="number" min="1" max="10">
       <span class="dgh-sub">次（一波断联内）</span>
     </div>
   </div>
@@ -1435,6 +1446,11 @@ function buildSettingsClientJs(apiBase, state) {
   document.querySelectorAll("input[name=mode]").forEach(function(r){
     r.addEventListener("change", function(){
       saveField({ mode: radioValue("mode") || "auto" });
+    });
+  });
+  document.querySelectorAll("input[name=replySummaryFrequency]").forEach(function(r){
+    r.addEventListener("change", function(){
+      saveField({ replySummaryFrequency: radioValue("replySummaryFrequency") || "standard" });
     });
   });
   document.querySelectorAll("input[name=action]").forEach(function(r){

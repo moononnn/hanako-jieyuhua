@@ -81,6 +81,7 @@ export default function registerPluginApiRoutes(app, ctx) {
 
       if (body.presentation === "card" || body.presentation === "ball" || body.presentation === "off") patch.presentation = body.presentation;
       if (body.mode === "auto" || body.mode === "always") patch.mode = body.mode;
+      if (["less", "standard", "more"].includes(body.replySummaryFrequency)) patch.replySummaryFrequency = body.replySummaryFrequency;
       if ([2, 3, 4].includes(body.count)) patch.count = body.count;
       if (body.action === "send" || body.action === "copy") patch.action = body.action;
       if (typeof body.guideDismissed === "boolean") patch.guideDismissed = body.guideDismissed;
