@@ -8,6 +8,9 @@ import unittest
 from PyQt6.QtCore import QEvent, QTimer
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+# 不写字节码：exec_module 会把 zhujian_app 编译进 python/__pycache__，
+# 而火绒把那份 .pyc 误报为 Trojan/Python.ShellLoader（2026-09-30 由隔离区记录确认）。
+sys.dont_write_bytecode = True
 MODULE_PATH = pathlib.Path(__file__).parents[1] / "python" / "zhujian_app.py"
 _MODULE_NAME = "_jiegehua_zhujian_app_test"
 

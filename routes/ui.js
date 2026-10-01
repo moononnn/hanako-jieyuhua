@@ -370,8 +370,11 @@ ${hanaCss ? `<link rel="stylesheet" href="${escapeAttr(hanaCss)}">` : ""}
     padding: 7px 10px;
   }
   .dgh-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  /* 行内说明文字：.dgh-sub 自带 18px 下边距，直接放进 flex 行会把文字抬高半个身位 */
+  .dgh-row > .dgh-sub { margin-bottom: 0; line-height: 1.2; }
   .dgh-resume-limit-row > .dgh-sub { margin-bottom: 0; line-height: 1.2; }
   .dgh-resume-limit-row .dgh-input { width: 72px; height: 28px; padding: 2px 8px; line-height: 1.2; border-radius: 8px; }
+  #dgh-resume-mode { font-size: 12px; line-height: 1.2; padding: 4px 10px; }
   .dgh-btn {
     font-family: inherit; font-size: 13px;
     color: var(--dgh-paper);
@@ -654,7 +657,7 @@ ${hanaCss ? `<link rel="stylesheet" href="${escapeAttr(hanaCss)}">` : ""}
 
   <div class="dgh-card" id="dgh-summary-frequency-card">
     <div class="dgh-card-title">速览出现频率</div>
-    <div class="dgh-sub">速览只放在完整回复的最后。字数是大概参照，内容层次也会影响是否出现。</div>
+    <div class="dgh-sub">速览只放在完整回复的最后。字数是大概参照；正文里有需要你拍板、选一条路的地方也会出现。</div>
     ${radio("replySummaryFrequency", "less", cfg.replySummaryFrequency === "less", "少一点", "特别长或层次很多时才加，大约 800 字以上")}
     ${radio("replySummaryFrequency", "standard", cfg.replySummaryFrequency === "standard", "标准", "默认档；偏长或需要展开几层时加，大约 500 字以上")}
     ${radio("replySummaryFrequency", "more", cfg.replySummaryFrequency === "more", "多一点", "有几个需要分别说明的重点时就加，大约 300 字以上")}

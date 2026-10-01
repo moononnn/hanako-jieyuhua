@@ -37,7 +37,7 @@
 - `PENDING_CHANGES.md`、`PROJECT_LOG.md`
 - `.gitignore`、施工方案、交接文档和其他本地开发资料
 - `data.json`、`preferences.json`、`*.log`、`node_modules/`
-- `_backups/`、`__pycache__/`、`*.pyc`、`.bak`、临时文件
+- `_backups/`、`__pycache__/`、`*.pyc`、`.bak`、临时文件（`.pyc` 不是“尽量排除”，是硬红线：火绒把 Python 字节码误报为 `Trojan/Python.ShellLoader`，包内带一个就会弹拦截、传不上去）
 - 任何用户数据、凭据、运行时状态和本地测试入口
 
 ### 打包约束
@@ -47,6 +47,7 @@
 - 用 .NET `System.IO.Compression.ZipFile` 创建 zip；不要使用 `Compress-Archive`，也不要用 tar 直接作为最终安装包。
 - zip 根部直接是插件文件，不允许 `./` 前缀或额外的父目录层级。
 - `PUBLISHING.md` 是开发契约，不进入安装包。
+- 打包前先确认真实目录里没有 `__pycache__/` 和 `.pyc`；正式目录清理与打包排除是两道独立防线，不能只靠其中一道。
 
 ## 4. 固定验证命令
 
@@ -60,7 +61,7 @@ node <plugin-dev-guide>/scripts/check-file-budget.js
 
 本仓库的文件预算脚本位于插件开发 skill；若项目目录没有 `scripts/check-file-budget.js`，使用已安装 skill 中的脚本路径。
 
-Windows 上运行 Python 测试前设置 `PYTHONDONTWRITEBYTECODE=1`；语法检查用下面的内存编译，不运行会写入 `__pycache__` 的 `py_compile`。
+Windows 上运行 Python 测试前设置 `PYTHONDONTWRITEBYTECODE=1`；语法检查用下面的内存编译，不运行会写入 `__pycache__` 的 `py_compile`。原因：火绒把 `.pyc` 当病毒拦，见 `TESTING.md` 的火绒误报章节；不要用关闭监控或加白名单的方式绕过。
 
 还要运行：
 

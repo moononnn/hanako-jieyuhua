@@ -35,16 +35,28 @@ function hasAskGuidance(messages) {
   });
 }
 
+function replySummarySystem(messages) {
+  for (const message of messages) {
+    const content = message?.content;
+    if (typeof content === "string" && content.includes("（解语花·回复速览）")) return content;
+    if (Array.isArray(content)) {
+      const part = content.find((item) => typeof item?.text === "string" && item.text.includes("（解语花·回复速览）"));
+      if (part) return part.text;
+    }
+  }
+  return "";
+}
+
 function hasReplySummarySystem(messages) {
-  return messages.some((message) => typeof message?.content === "string"
-    && message.content.includes("🌸 解语花 · 回复速览")
-    && message.content.includes("Markdown 引用块")
-    && message.content.includes("正文之后")
-    && message.content.includes("最后一个内容")
-    && message.content.includes("不能用速览替代、缩短或省略正文")
-    && message.content.includes("标题必须逐字使用这一行")
-    && message.content.includes("用户需要做的下一步")
-    && message.content.includes("总计最多三条短要点"));
+  const system = replySummarySystem(messages);
+  return system.includes("🌸 解语花 · 回复速览")
+    && system.includes("Markdown 引用块")
+    && system.includes("正文之后")
+    && system.includes("最后一个内容")
+    && system.includes("不能用速览替代、缩短或省略正文")
+    && system.includes("标题必须逐字使用这一行")
+    && system.includes("用户需要做的下一步")
+    && system.includes("总计最多三条短要点");
 }
 
 function replySummaryNudge(messages) {
@@ -120,6 +132,52 @@ test("observer 为启用的解语花模式注入长回复速览引导，ask 引�
     const offResult = await handlers.context(off, { bus: { async request() { throw new Error("off mode should not query fusion"); } } });
     assert.equal(offResult, undefined);
     assert.equal(hasReplySummarySystem(off.messages), false);
+  } finally {
+    if (previousHome === undefined) delete process.env.HANA_HOME;
+    else process.env.HANA_HOME = previousHome;
+  }
+});
+
+test("速览引导要求写大白话，并在需要用户拍板时无视字数门槛也触发", async () => {
+  const previousHome = process.env.HANA_HOME;
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "jiegehua-observer-plain-"));
+  process.env.HANA_HOME = home;
+
+  try {
+    writeData(home, "card", "less");
+    const { default: installObserver } = await import(`../extensions/observer.js?observer-plain=${Date.now()}`);
+    const handlers = {};
+    installObserver({ on(name, handler) { handlers[name] = handler; } });
+
+    const messages = [{ role: "user", content: "帮我决定一下" }];
+    await handlers.context({ messages }, { bus: { async request() { throw new Error("card mode"); } } });
+
+    const system = replySummarySystem(messages);
+    const nudge = replySummaryNudge(messages);
+    assert.ok(system && nudge, "应同时注入 system 引导和用户消息 nudge");
+
+    // 大白话：禁术语/公文腔，而不是只要求「压缩」
+    assert.match(system, /速览的语言必须是人话/);
+    assert.match(system, /不得出现术语、缩写、英文标识、字段名、组件名和内部流程黑话/);
+    assert.match(system, /禁止「结论如下」「综上」「需要注意的点」这类公文腔/);
+    assert.match(system, /不能拿内部模块当主语/);
+    assert.match(nudge, /速览要写成人话/);
+
+    // 拍板场景不看字数门槛
+    for (const text of [system, nudge]) {
+      assert.match(text, /或者正文里有需要用户拍板、选一条路或确认要不要做的事/);
+      assert.match(text, /哪怕还没到字数门槛/);
+    }
+    assert.match(system, /现在轮到你定……/);
+    assert.match(system, /不能只丢一句「请回复 1\/2」/);
+    assert.match(system, /看不懂、太长了、说人话、懒得看/);
+    assert.match(nudge, /现在轮到你定/);
+
+    // 旧的硬约束一条都不能因为加料而丢掉
+    assert.match(nudge, /> \*\*🌸 解语花 · 回复速览\*\*/);
+    assert.match(nudge, /最多三条短要点/);
+    assert.match(nudge, /大约 800 字以上/, "少一点档仍应保留原有字数参照");
+    assert.equal(hasReplySummarySystem(messages), true);
   } finally {
     if (previousHome === undefined) delete process.env.HANA_HOME;
     else process.env.HANA_HOME = previousHome;
